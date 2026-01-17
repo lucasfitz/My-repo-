@@ -9,13 +9,6 @@ const MicIcon = ({ size = 24, className = "" }) => (
   </svg>
 );
 
-const SendIcon = ({ size = 24, className = "" }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-    <path d="m22 2-7 20-4-9-9-4Z"/>
-    <path d="M22 2 11 13"/>
-  </svg>
-);
-
 const XIcon = ({ size = 24, className = "" }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
     <path d="M18 6 6 18"/>
@@ -23,17 +16,10 @@ const XIcon = ({ size = 24, className = "" }) => (
   </svg>
 );
 
-const ChevronLeftIcon = ({ size = 24, className = "" }) => (
+const SettingsIcon = ({ size = 24, className = "" }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-    <path d="m15 18-6-6 6-6"/>
-  </svg>
-);
-
-const MoreHorizontalIcon = ({ size = 24, className = "" }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-    <circle cx="12" cy="12" r="1"/>
-    <circle cx="19" cy="12" r="1"/>
-    <circle cx="5" cy="12" r="1"/>
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M12 1v6m0 6v6M5.64 5.64l4.24 4.24m4.24 4.24l4.24 4.24M1 12h6m6 0h6M5.64 18.36l4.24-4.24m4.24-4.24l4.24-4.24"/>
   </svg>
 );
 
@@ -109,32 +95,33 @@ export default function VoiceChatApp() {
     sendMessage(inputText);
   };
 
-  const startRecording = () => {
-    setIsRecording(true);
-    setCharacterMood('listening');
-  };
+  const toggleRecording = () => {
+    if (isRecording) {
+      // Stop recording
+      setIsRecording(false);
+      const transcribedText = "I'd love to learn something new today";
+      const userMessage = { role: 'user', content: transcribedText, type: 'voice', timestamp: new Date() };
+      setMessages(prev => [...prev, userMessage]);
+      setIsProcessing(true);
+      setCharacterMood('thinking');
 
-  const stopRecording = () => {
-    setIsRecording(false);
-
-    const transcribedText = "I'd love to learn something new today";
-    const userMessage = { role: 'user', content: transcribedText, type: 'voice', timestamp: new Date() };
-    setMessages(prev => [...prev, userMessage]);
-    setIsProcessing(true);
-    setCharacterMood('thinking');
-
-    setTimeout(() => {
-      const aiMessage = {
-        role: 'assistant',
-        content: generateResponse(transcribedText),
-        type: 'text',
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, aiMessage]);
-      setIsProcessing(false);
-      setCharacterMood('happy');
-      setTimeout(() => setCharacterMood('idle'), 2000);
-    }, 1500);
+      setTimeout(() => {
+        const aiMessage = {
+          role: 'assistant',
+          content: generateResponse(transcribedText),
+          type: 'text',
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, aiMessage]);
+        setIsProcessing(false);
+        setCharacterMood('happy');
+        setTimeout(() => setCharacterMood('idle'), 2000);
+      }, 1500);
+    } else {
+      // Start recording
+      setIsRecording(true);
+      setCharacterMood('listening');
+    }
   };
 
   const handleKeyPress = (e) => {
@@ -145,128 +132,132 @@ export default function VoiceChatApp() {
   };
 
   const Character = ({ mood, size = 'large' }) => {
-    const baseSize = size === 'large' ? 180 : 44;
-    const eyeSize = size === 'large' ? 16 : 6;
+    const baseSize = size === 'large' ? 240 : 44;
 
     return (
       <div
-        className={`relative rounded-full flex items-center justify-center shadow-xl transition-all duration-500 ${
+        className={`relative flex items-center justify-center transition-all duration-500 ${
           mood === 'listening' ? 'scale-105' : mood === 'thinking' ? 'scale-95' : ''
         }`}
         style={{
           width: baseSize,
           height: baseSize,
-          background: 'linear-gradient(135deg, #fcd34d 0%, #fb923c 50%, #f472b6 100%)'
         }}
       >
-        {/* Glow effect */}
+        {/* Main character blob */}
         <div
-          className={`absolute inset-0 rounded-full blur-xl transition-opacity duration-500 ${
-            mood === 'listening' ? 'opacity-80' : mood === 'happy' ? 'opacity-60' : 'opacity-0'
-          }`}
-          style={{ background: 'linear-gradient(135deg, #fcd34d50 0%, #fb923c50 50%, #f472b650 100%)' }}
+          className="absolute inset-0 rounded-full"
+          style={{
+            background: 'linear-gradient(135deg, #FFB5A7 0%, #FEC89A 50%, #FED7AA 100%)',
+            boxShadow: '0 20px 60px rgba(254, 200, 154, 0.4)',
+          }}
         />
 
-        <div className="relative flex flex-col items-center justify-center">
-          {size === 'large' && (
-            <svg width="90" height="36" viewBox="0 0 90 36" className="mb-1">
-              <ellipse cx="22" cy="18" rx="16" ry="16" fill="none" stroke="#1a1a1a" strokeWidth="5" strokeLinecap="round"/>
-              <ellipse cx="68" cy="18" rx="16" ry="16" fill="none" stroke="#1a1a1a" strokeWidth="5" strokeLinecap="round"/>
-              <path d="M38 18 Q45 14 52 18" fill="none" stroke="#1a1a1a" strokeWidth="5" strokeLinecap="round"/>
-            </svg>
-          )}
-
-          <div
-            className={`flex items-center justify-center transition-all duration-300 ${size === 'large' ? '-mt-6' : ''}`}
-            style={{ gap: size === 'large' ? 32 : 10 }}
-          >
-            <div
-              className={`bg-gray-900 rounded-full transition-all duration-300 ${
-                mood === 'happy' ? 'scale-y-50' : mood === 'listening' ? 'scale-110' : ''
-              }`}
-              style={{ width: eyeSize, height: eyeSize * 1.2 }}
-            />
-            <div
-              className={`bg-gray-900 rounded-full transition-all duration-300 ${
-                mood === 'happy' ? 'scale-y-50' : mood === 'listening' ? 'scale-110' : ''
-              }`}
-              style={{ width: eyeSize, height: eyeSize * 1.2 }}
-            />
-          </div>
-
-          {size === 'large' && (
-            <div className={`mt-3 transition-all duration-300 ${
-              mood === 'happy' ? 'w-8 h-4 border-b-4 border-gray-900 rounded-b-full' :
-              mood === 'listening' ? 'w-4 h-4 bg-gray-900 rounded-full' :
-              mood === 'thinking' ? 'w-6 h-1 bg-gray-900 rounded-full translate-x-2' :
-              'w-6 h-1 bg-gray-900 rounded-full'
-            }`} />
-          )}
-        </div>
-
+        {/* Glow effect when listening */}
         {mood === 'listening' && size === 'large' && (
           <>
-            <div className="absolute inset-0 rounded-full border-4 border-amber-300/40 animate-ping" />
-            <div className="absolute inset-0 rounded-full border-2 border-rose-300/30 animate-pulse" />
+            <div
+              className="absolute inset-0 rounded-full animate-ping"
+              style={{
+                background: 'radial-gradient(circle, rgba(254, 200, 154, 0.6) 0%, transparent 70%)',
+              }}
+            />
+            <div
+              className="absolute inset-0 rounded-full animate-pulse"
+              style={{
+                background: 'radial-gradient(circle, rgba(255, 181, 167, 0.4) 0%, transparent 70%)',
+              }}
+            />
           </>
         )}
+
+        {/* Glasses and face */}
+        <div className="relative flex flex-col items-center justify-center z-10">
+          {size === 'large' && (
+            <>
+              {/* Glasses */}
+              <div className="flex items-center gap-3 mb-2">
+                {/* Left lens */}
+                <div className="relative">
+                  <div
+                    className="rounded-full border-[6px] border-gray-800 bg-gray-800/5"
+                    style={{ width: 52, height: 52 }}
+                  />
+                  {/* Left pupil */}
+                  <div
+                    className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-gray-900 rounded-full transition-all duration-300 ${
+                      mood === 'happy' ? 'scale-y-50' : mood === 'listening' ? 'scale-110' : ''
+                    }`}
+                    style={{ width: 8, height: 10 }}
+                  />
+                </div>
+
+                {/* Bridge */}
+                <div className="w-3 h-1 bg-gray-800 rounded-full" style={{ marginTop: -2 }} />
+
+                {/* Right lens */}
+                <div className="relative">
+                  <div
+                    className="rounded-full border-[6px] border-gray-800 bg-gray-800/5"
+                    style={{ width: 52, height: 52 }}
+                  />
+                  {/* Right pupil */}
+                  <div
+                    className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-gray-900 rounded-full transition-all duration-300 ${
+                      mood === 'happy' ? 'scale-y-50' : mood === 'listening' ? 'scale-110' : ''
+                    }`}
+                    style={{ width: 8, height: 10 }}
+                  />
+                </div>
+              </div>
+
+              {/* Mouth */}
+              <div className={`mt-2 transition-all duration-300 ${
+                mood === 'happy' ? 'w-8 h-4 border-b-[3px] border-gray-800 rounded-b-full' :
+                mood === 'listening' ? 'w-3 h-3 bg-gray-800 rounded-full' :
+                mood === 'thinking' ? 'w-6 h-1 bg-gray-800 rounded-full' :
+                'w-6 h-1 bg-gray-800 rounded-full'
+              }`} />
+            </>
+          )}
+
+          {size === 'small' && (
+            <div className="flex items-center gap-1">
+              {/* Small glasses for avatar */}
+              <div className="w-3 h-3 rounded-full border-2 border-gray-800" />
+              <div className="w-3 h-3 rounded-full border-2 border-gray-800" />
+            </div>
+          )}
+        </div>
       </div>
     );
   };
 
   return (
     <div
-      className="h-screen flex flex-col overflow-hidden bg-gradient-to-b from-slate-50 via-orange-50/30 to-amber-50/50"
+      className="h-screen flex flex-col overflow-hidden"
+      style={{
+        background: 'linear-gradient(180deg, #F3E8FF 0%, #FCE7F3 20%, #FED7AA 60%, #FEE2C5 100%)'
+      }}
     >
-      {/* iOS Status Bar */}
-      <div className="flex items-center justify-between px-6 pt-3 pb-1 text-sm font-semibold">
-        <span>9:41</span>
-        <div className="absolute left-1/2 -translate-x-1/2 w-28 h-7 bg-black rounded-full" />
-        <div className="flex items-center gap-1">
-          <svg width="18" height="12" viewBox="0 0 18 12"><path d="M1 4.5h2v7H1zM5 3h2v8.5H5zM9 1.5h2V12H9zM13 0h2v12h-2z" fill="currentColor"/></svg>
-          <svg width="16" height="12" viewBox="0 0 16 12"><path d="M8 2a6 6 0 014.9 2.5.5.5 0 01-.8.6A5 5 0 008 3a5 5 0 00-4.1 2.1.5.5 0 01-.8-.6A6 6 0 018 2zm0 3a4 4 0 013.3 1.7.5.5 0 01-.8.6A3 3 0 008 6a3 3 0 00-2.5 1.3.5.5 0 01-.8-.6A4 4 0 018 5zm0 3a2 2 0 011.6.8.5.5 0 01-.8.6 1 1 0 00-1.6 0 .5.5 0 01-.8-.6A2 2 0 018 8zm0 2a1 1 0 110 2 1 1 0 010-2z" fill="currentColor"/></svg>
-          <svg width="25" height="12" viewBox="0 0 25 12"><rect x="0" y="0" width="22" height="12" rx="3" fill="none" stroke="currentColor" strokeWidth="1"/><rect x="22" y="4" width="2" height="4" rx="1" fill="currentColor"/><rect x="2" y="2" width="17" height="8" rx="1.5" fill="currentColor"/></svg>
-        </div>
-      </div>
-
-      {/* Nav Bar */}
-      <div className="flex items-center justify-between px-4 py-3">
-        <button className="p-2 -ml-2 hover:bg-black/5 rounded-full transition-colors">
-          <ChevronLeftIcon size={28} className="text-orange-500" />
-        </button>
-        <h1 className="text-lg font-semibold text-gray-900">Mico</h1>
-        <button className="p-2 -mr-2 hover:bg-black/5 rounded-full transition-colors">
-          <MoreHorizontalIcon size={24} className="text-gray-400" />
-        </button>
-      </div>
-
       {/* Main Content */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto flex flex-col">
         {messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full px-8 -mt-8">
+          <div className="flex flex-col items-center justify-center flex-1 px-8 pb-32">
             <Character mood={characterMood} size="large" />
 
-            <h2 className="text-2xl font-bold text-gray-900 text-center mt-8 mb-2">
-              Hey there! 👋
+            <h2 className="text-[32px] font-bold text-gray-900 text-center mt-12 leading-tight max-w-sm">
+              Let's dive in. What would you like to learn?
             </h2>
-            <p className="text-gray-500 text-center text-base leading-relaxed max-w-xs">
-              I'm excited to chat with you. Ask me anything or just say hello!
-            </p>
 
-            <div className="flex flex-wrap justify-center gap-2 mt-8 max-w-sm">
-              {['Tell me a fun fact', 'Help me brainstorm', 'Explain something'].map((suggestion) => (
-                <button
-                  key={suggestion}
-                  onClick={() => sendMessage(suggestion)}
-                  className="px-4 py-2 bg-white rounded-full text-sm text-gray-700 shadow-sm border border-gray-100 hover:shadow-md hover:border-orange-200 transition-all active:scale-95"
-                >
-                  {suggestion}
-                </button>
-              ))}
-            </div>
+            {isRecording && (
+              <p className="text-gray-600 text-lg mt-4">
+                Recording: {formatDuration(recordingDuration)}
+              </p>
+            )}
           </div>
         ) : (
-          <div className="px-4 pb-4">
+          <div className="px-4 pb-4 pt-8">
             <div className="flex justify-center py-4">
               <Character mood={characterMood} size="small" />
             </div>
@@ -280,11 +271,11 @@ export default function VoiceChatApp() {
                   <div
                     className={`max-w-[80%] px-4 py-3 ${
                       msg.role === 'user'
-                        ? 'text-white rounded-2xl rounded-br-md shadow-lg shadow-orange-200/50'
-                        : 'bg-white text-gray-800 rounded-2xl rounded-bl-md shadow-md'
+                        ? 'text-white rounded-2xl rounded-br-md shadow-lg'
+                        : 'bg-white/80 backdrop-blur text-gray-800 rounded-2xl rounded-bl-md shadow-md'
                     }`}
                     style={msg.role === 'user' ? {
-                      background: 'linear-gradient(135deg, #fb923c 0%, #f59e0b 100%)'
+                      background: 'linear-gradient(135deg, #FB923C 0%, #F59E0B 100%)'
                     } : {}}
                   >
                     {msg.type === 'voice' && (
@@ -300,7 +291,7 @@ export default function VoiceChatApp() {
 
               {isProcessing && (
                 <div className="flex justify-start">
-                  <div className="bg-white px-5 py-4 rounded-2xl rounded-bl-md shadow-md">
+                  <div className="bg-white/80 backdrop-blur px-5 py-4 rounded-2xl rounded-bl-md shadow-md">
                     <div className="flex gap-1.5">
                       <div className="w-2 h-2 bg-orange-300 rounded-full animate-bounce" style={{animationDelay: '0ms'}} />
                       <div className="w-2 h-2 bg-orange-400 rounded-full animate-bounce" style={{animationDelay: '150ms'}} />
@@ -315,35 +306,14 @@ export default function VoiceChatApp() {
         )}
       </div>
 
-      {/* Recording Overlay */}
-      {isRecording && (
-        <div
-          className="absolute inset-0 flex flex-col items-center justify-center z-50 backdrop-blur-sm"
-          style={{ background: 'linear-gradient(180deg, rgba(251, 146, 60, 0.97) 0%, rgba(245, 158, 11, 0.97) 100%)' }}
-        >
-          <Character mood="listening" size="large" />
-
-          <p className="text-white text-xl font-medium mt-8">Listening...</p>
-          <p className="text-white/70 text-lg mt-2">{formatDuration(recordingDuration)}</p>
-
-          <button
-            onClick={stopRecording}
-            className="mt-12 w-20 h-20 bg-white rounded-full flex items-center justify-center shadow-2xl active:scale-95 transition-transform"
-          >
-            <div className="w-8 h-8 bg-orange-500 rounded-md" />
-          </button>
-          <p className="text-white/60 text-sm mt-4">Tap to stop</p>
-        </div>
-      )}
-
-      {/* Input Area */}
-      <div className="px-4 pb-8 pt-2">
-        <div className="bg-white rounded-full shadow-lg shadow-gray-200/50 border border-gray-100 flex items-center px-2 py-1.5 gap-1">
+      {/* Input Area - Always visible */}
+      <div className="px-6 pb-12 pt-4">
+        <div className="bg-white/90 backdrop-blur-xl rounded-[28px] shadow-lg flex items-center px-4 py-3 gap-3">
           <button
             onClick={() => setMessages([])}
-            className="p-2.5 hover:bg-gray-100 rounded-full transition-colors"
+            className="p-2 hover:bg-gray-100 rounded-full transition-colors flex-shrink-0"
           >
-            <XIcon size={22} className="text-gray-400" />
+            <XIcon size={24} className="text-gray-600" />
           </button>
 
           <input
@@ -352,30 +322,25 @@ export default function VoiceChatApp() {
             onChange={(e) => setInputText(e.target.value)}
             onKeyPress={handleKeyPress}
             placeholder="Message..."
-            className="flex-1 outline-none text-base text-gray-800 placeholder-gray-400 bg-transparent px-2"
+            className="flex-1 outline-none text-base text-gray-800 placeholder-gray-400 bg-transparent"
           />
 
-          {inputText.trim() ? (
-            <button
-              onClick={handleSendText}
-              className="p-2.5 rounded-full hover:shadow-lg transition-all active:scale-95"
-              style={{ background: 'linear-gradient(135deg, #fb923c 0%, #f59e0b 100%)' }}
-            >
-              <SendIcon size={20} className="text-white" />
-            </button>
-          ) : (
-            <button
-              onClick={startRecording}
-              className="p-3 rounded-full hover:shadow-lg transition-all active:scale-95"
-              style={{ background: 'linear-gradient(135deg, #fb923c 0%, #f59e0b 100%)' }}
-            >
-              <MicIcon size={22} className="text-white" />
-            </button>
-          )}
-        </div>
+          <button
+            onClick={toggleRecording}
+            className={`p-3 rounded-full transition-all flex-shrink-0 ${
+              isRecording
+                ? 'bg-red-500 hover:bg-red-600 animate-pulse'
+                : 'bg-cyan-400 hover:bg-cyan-500'
+            }`}
+          >
+            <MicIcon size={24} className="text-white" />
+          </button>
 
-        <div className="flex justify-center mt-4">
-          <div className="w-32 h-1 bg-gray-900/20 rounded-full" />
+          <button
+            className="p-3 hover:bg-gray-100 rounded-full transition-colors flex-shrink-0"
+          >
+            <SettingsIcon size={24} className="text-gray-600" />
+          </button>
         </div>
       </div>
     </div>
