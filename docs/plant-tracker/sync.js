@@ -48,6 +48,40 @@ function syncConfigured() {
   return !!(s && s.url && s.key && s.household);
 }
 
+// ---------------------------------------------------------------------------
+// Pairing: one phone sets Supabase up, the rest join by opening a link.
+// The link carries url + key + household in its hash, so nothing is typed and
+// nothing is sent to a server — the hash never leaves the device it opens on.
+// ---------------------------------------------------------------------------
+function b64urlEncode(str) {
+  return btoa(unescape(encodeURIComponent(str)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(str) {
+  const pad = str.replace(/-/g, "+").replace(/_/g, "/");
+  return decodeURIComponent(escape(atob(pad + "=".repeat((4 - pad.length % 4) % 4))));
+}
+
+function pairingLink() {
+  const s = state.settings.sync;
+  const payload = b64urlEncode(JSON.stringify({ u: s.url, k: s.key, h: s.household }));
+  return location.origin + location.pathname + "#/pair/" + payload;
+}
+
+// Called by the router when a pairing link is opened.
+async function acceptPairing(payload) {
+  const { u, k, h } = JSON.parse(b64urlDecode(payload));
+  if (!u || !k || !h) throw new Error("This pairing link looks incomplete.");
+  state.settings.sync = { url: u, key: k, household: h, lastPullAt: "" };
+  await saveSettings();
+  const ok = await syncConnect(true);
+  if (!ok) {
+    state.settings.sync = null;
+    await saveSettings();
+    throw new Error(SYNC.statusMsg || "Couldn't reach the shared database.");
+  }
+}
+
 function syncStatusText() {
   switch (SYNC.status) {
     case "online": return "🟢 Connected — changes sync live";

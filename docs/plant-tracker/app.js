@@ -793,6 +793,37 @@ async function viewGuide() {
   });
 }
 
+// ----- Pairing (opened from a "Pair another phone" link) -----
+async function viewPair(payload) {
+  const already = syncConfigured();
+  $view().innerHTML = `
+    <h1>Join the garden</h1>
+    <p class="subtitle">This link connects this phone to a shared Sprout garden. You'll both see the same plants, photos, and checklists — live.</p>
+    ${already ? `<div class="card flat"><b>Heads up</b><p class="subtitle" style="margin:6px 0 0">This phone is already synced. Joining a different garden replaces what's here — export a backup first if you're unsure.</p></div>` : ""}
+    <div class="card">
+      <button class="btn block" id="pairAccept">${already ? "Switch to this garden" : "Join garden"}</button>
+      <button class="btn block secondary" id="pairCancel" style="margin-top:8px">Not now</button>
+      <div id="pairMsg"></div>
+    </div>`;
+
+  document.getElementById("pairCancel").addEventListener("click", () => { location.hash = "#/today"; });
+  document.getElementById("pairAccept").addEventListener("click", async e => {
+    const btn = e.target, msg = document.getElementById("pairMsg");
+    btn.disabled = true;
+    btn.textContent = "Connecting…";
+    msg.innerHTML = "";
+    try {
+      await acceptPairing(payload);
+      toast("Connected — your gardens are now shared");
+      location.hash = "#/today";
+    } catch (err) {
+      msg.innerHTML = `<p class="subtitle" style="margin-top:10px">⚠️ ${esc(err.message)}</p>`;
+      btn.disabled = false;
+      btn.textContent = already ? "Switch to this garden" : "Join garden";
+    }
+  });
+}
+
 // ----- Settings -----
 async function viewSettings() {
   const notifState = ("Notification" in window) ? Notification.permission : "unsupported";
@@ -865,29 +896,30 @@ async function viewSettings() {
       <h2 style="margin-top:0">Real-time sync</h2>
       <p class="subtitle" id="syncStatus">${syncStatusText()}</p>
       ${syncConfigured() ? `
-        <p class="subtitle">Household code: <b>${esc(state.settings.sync.household)}</b>. Both phones with this code share one live database — waterings, photos, and checklists appear on the other phone within seconds.</p>
+        <p class="subtitle">You and everyone you've paired share one live database — waterings, photos, and checklists appear on the other phone within seconds.</p>
+        <button class="btn block" id="pairBtn" style="margin-bottom:10px">Pair another phone</button>
+        <div id="pairBox"></div>
         <div class="action-row">
           <button class="btn secondary" id="syncNowBtn">Sync now</button>
           <button class="btn danger" id="syncOffBtn">Disconnect</button>
         </div>` : `
-        <details style="margin-bottom:12px">
-          <summary style="cursor:pointer;font-weight:600">One-time setup (~5 min, free)</summary>
-          <ol style="padding-left:18px;font-size:.85rem;margin-top:8px">
-            <li>Create a free account at <b>supabase.com</b> and make a <b>New project</b> (any name, e.g. "sprout").</li>
-            <li>In the project, open <b>SQL Editor</b>, paste the setup script (button below), and press <b>Run</b>.</li>
-            <li>Go to <b>Settings → API</b> and copy the <b>Project URL</b> and the <b>anon / publishable key</b>.</li>
-            <li>Paste both below, pick any household code you like, and hit Connect.</li>
-            <li>On the second phone: open this same Settings page and enter the <i>same</i> URL, key, and household code.</li>
+        <p class="subtitle"><b>Only one of you does this.</b> The other phone gets a link and joins with one tap.</p>
+        <details style="margin-bottom:12px" open>
+          <summary style="cursor:pointer;font-weight:600">Set up the shared database (~5 min, free, once)</summary>
+          <ol style="padding-left:18px;font-size:.85rem;margin-top:8px;line-height:1.6">
+            <li>Open <b>supabase.com</b>, sign up (free — no card needed), and click <b>New project</b>. Any name works; save the database password it asks for, you won't need it again.</li>
+            <li>Wait ~2 min for it to finish setting up.</li>
+            <li>In the left sidebar open <b>SQL Editor</b>, tap the button below to copy the script, paste it in, and press <b>Run</b>.</li>
+            <li>In the left sidebar open <b>Settings → API</b>. Copy the <b>Project URL</b> and the <b>anon public</b> key into the two boxes below.</li>
+            <li>Hit Connect — then use <b>Pair another phone</b> to bring your wife's phone in.</li>
           </ol>
           <button class="btn small secondary" id="copySqlBtn" type="button">Copy setup script</button>
         </details>
         <form id="syncForm">
-          <div class="field"><label for="syncUrl">Supabase project URL</label>
+          <div class="field"><label for="syncUrl">Project URL</label>
             <input type="text" id="syncUrl" placeholder="https://xxxx.supabase.co" autocapitalize="off" autocorrect="off"></div>
-          <div class="field"><label for="syncKey">Anon / publishable key</label>
+          <div class="field"><label for="syncKey">anon public key</label>
             <input type="text" id="syncKey" placeholder="eyJ… or sb_publishable_…" autocapitalize="off" autocorrect="off"></div>
-          <div class="field"><label for="syncHome">Household code (same on both phones)</label>
-            <input type="text" id="syncHome" placeholder="e.g. fitz-jungle-42" autocapitalize="off" autocorrect="off"></div>
           <button class="btn block" type="submit">Connect</button>
         </form>`}
     </div>
@@ -997,8 +1029,10 @@ async function viewSettings() {
       e.preventDefault();
       const url = document.getElementById("syncUrl").value.trim().replace(/\/+$/, "");
       const key = document.getElementById("syncKey").value.trim();
-      const household = document.getElementById("syncHome").value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-      if (!url || !key || !household) { toast("Fill in all three fields"); return; }
+      if (!url || !key) { toast("Paste both the URL and the key"); return; }
+      // The household code is generated, not typed — the second phone gets it
+      // from the pairing link, so there's nothing to keep in sync by hand.
+      const household = "home-" + uid();
       state.settings.sync = { url, key, household, lastPullAt: "" };
       await saveSettings();
       const ok = await syncConnect(true);
@@ -1007,6 +1041,29 @@ async function viewSettings() {
       render();
     });
   }
+  const pairBtn = document.getElementById("pairBtn");
+  if (pairBtn) pairBtn.addEventListener("click", async () => {
+    const link = pairingLink();
+    const box = document.getElementById("pairBox");
+    // Native share sheet where available (AirDrop/Messages); copy link otherwise.
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: "Join our Sprout garden", text: "Tap to sync our plants:", url: link });
+        toast("Sent — they just tap the link");
+        return;
+      } catch { /* dismissed; fall through to the copyable link */ }
+    }
+    box.innerHTML = `
+      <p class="subtitle" style="margin-bottom:8px">Send this link to the other phone. Opening it connects them automatically — nothing to type.</p>
+      <div class="inline-form"><input type="text" id="pairLink" value="${esc(link)}" readonly><button class="btn secondary" id="pairCopy">Copy</button></div>
+      <p class="hint" style="color:var(--ink-soft);font-size:.78rem;margin-top:6px">Treat it like a house key — it grants access to your garden data.</p>`;
+    document.getElementById("pairLink").addEventListener("focus", e => e.target.select());
+    document.getElementById("pairCopy").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(link); toast("Link copied"); }
+      catch { document.getElementById("pairLink").select(); toast("Press and hold to copy"); }
+    });
+  });
+
   const syncNowBtn = document.getElementById("syncNowBtn");
   if (syncNowBtn) {
     syncNowBtn.addEventListener("click", async () => {
@@ -1143,6 +1200,7 @@ const routes = [
   { re: /^#\/plant\/(.+)$/, fn: m => viewPlant(m[1]), tab: "plants" },
   { re: /^#\/guide$/, fn: () => viewGuide(), tab: "guide" },
   { re: /^#\/settings$/, fn: () => viewSettings(), tab: "settings" },
+  { re: /^#\/pair\/(.+)$/, fn: m => viewPair(m[1]), tab: "settings" },
 ];
 
 async function render() {
