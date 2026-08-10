@@ -67,7 +67,7 @@ async function removeRecord(store, id) {
 // ---------------------------------------------------------------------------
 // Settings / household profiles
 // ---------------------------------------------------------------------------
-const state = { settings: { users: ["Lucas", "Partner"], activeUser: "Lucas", lastNotified: "", rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office"] } };
+const state = { settings: { users: ["Lucas", "Partner"], activeUser: "Lucas", lastNotified: "", rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office", "Porch"] } };
 
 async function loadSettings() {
   const row = await dbGet("settings", "main");
@@ -113,9 +113,13 @@ function dueLabel(dueStr) {
 }
 
 // Due date for an action on a plant. Falls back to createdAt if never done.
+// Outdoor plants' watering interval flexes with the season (weather.js).
 function nextDue(plant, kind) {
-  const every = kind === "water" ? plant.waterEvery : plant.fertEvery;
+  let every = kind === "water" ? plant.waterEvery : plant.fertEvery;
   if (!every) return null; // schedule disabled
+  if (kind === "water" && isOutdoorPlant(plant)) {
+    every = Math.max(1, Math.round(every * seasonFactor()));
+  }
   const last = kind === "water" ? plant.lastWatered : plant.lastFertilized;
   const base = last || plant.createdAt.slice(0, 10);
   return addDays(base, every);
@@ -214,6 +218,9 @@ function plantEmoji(p) { return guideEntry(p.speciesKey).emoji; }
 // ----- Today -----
 async function viewToday() {
   const plants = await dbAll("plants");
+  const hasOutdoor = plants.some(p => !p.archived && isOutdoorPlant(p));
+  const wx = hasOutdoor ? await getWeather() : null;
+  const wxFlags = wx ? todayWeatherFlags(wx) : {};
   const care = computeCareTasks(plants);
   const overdue = care.filter(t => t.delta < 0);
   const dueToday = care.filter(t => t.delta === 0);
@@ -233,17 +240,51 @@ async function viewToday() {
     </div>
     <div class="tip-card">${SEASONAL_TIPS[season]}</div>`;
 
+  // Porch weather: live conditions + advice for outdoor plants
+  if (hasOutdoor) {
+    if (!weatherConfigured()) {
+      html += `<div class="card flat wx-card">
+        <b>🌤️ Porch weather</b>
+        <p class="subtitle" style="margin:6px 0 10px">Set your location once and your porch plants get live rain, heat, and frost advice.</p>
+        <a class="btn small secondary" href="#/settings">Set location in Settings</a>
+      </div>`;
+    } else if (wx) {
+      const cur = wx.current || {};
+      const today0 = wxDay(wx, 0);
+      const deg = "°";
+      const advisories = weatherAdvisories(wx);
+      html += `<div class="card flat wx-card">
+        <div class="wx-now">
+          <span class="wx-temp">${wxEmoji(cur.weather_code)} ${Math.round(cur.temperature_2m)}${deg}</span>
+          <span class="wx-range">${today0 ? `H ${Math.round(today0.tmax)}${deg} · L ${Math.round(today0.tmin)}${deg}${today0.rain >= 1 ? ` · 🌧️ ${today0.rain.toFixed(1)} mm` : ""}` : ""}</span>
+          <span class="wx-loc">📍 ${esc(state.settings.weather.label || "your spot")}</span>
+        </div>
+        ${advisories.length
+          ? advisories.map(a => `<div class="wx-advice">${a.icon} ${esc(a.text)}</div>`).join("")
+          : `<div class="wx-advice">✅ Nothing dramatic in the forecast — regular care applies.</div>`}
+      </div>`;
+    } else {
+      html += `<div class="card flat wx-card"><b>🌤️ Porch weather</b><p class="subtitle" style="margin:6px 0 0">Couldn't reach the weather service — using your normal schedule for now.</p></div>`;
+    }
+  }
+
   const renderCareTask = async (t, cls) => {
     const photo = await latestPhotoURL(t.plant.id);
     const icon = t.kind === "water" ? "💧" : "🌾";
     const verb = t.kind === "water" ? "Water" : "Fertilize";
+    let wxTag = "";
+    if (t.kind === "water" && isOutdoorPlant(t.plant)) {
+      if (wxFlags.rainToday) wxTag = ` · <span class="wx-tag">🌧️ rain may cover this</span>`;
+      else if (wxFlags.hotToday) wxTag = ` · <span class="wx-tag hot">🔥 hot — don't skip</span>`;
+      else if (wxFlags.rainAhead && t.delta >= 0) wxTag = ` · <span class="wx-tag">🌦️ rain coming</span>`;
+    }
     return `
       <div class="task ${cls}" data-plant="${t.plant.id}" data-kind="${t.kind}">
         <button class="task-check" data-action="complete" aria-label="Mark done">✓</button>
         ${photo ? `<img class="task-thumb" src="${photo}" alt="">` : `<div class="task-thumb" style="display:grid;place-items:center">${plantEmoji(t.plant)}</div>`}
         <div class="task-body">
           <div class="task-title">${icon} ${verb} ${esc(t.plant.name)}</div>
-          <div class="task-sub">${esc(t.plant.location || "")}${t.plant.location ? " · " : ""}${dueLabel(t.due)}</div>
+          <div class="task-sub">${esc(t.plant.location || "")}${t.plant.location ? " · " : ""}${dueLabel(t.due)}${wxTag}</div>
         </div>
         <a class="btn small secondary" href="#/plant/${t.plant.id}">View</a>
       </div>`;
@@ -267,7 +308,8 @@ async function viewToday() {
       const label = i === 0 ? "Today" : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
       const chips = list.map(t =>
         `<span class="badge ${t.delta < 0 ? "overdue" : t.kind === "water" ? "water" : "fertilize"}">${t.kind === "water" ? "💧" : "🌾"} ${esc(t.plant.name)}</span>`).join("");
-      weekRows.push(`<div class="week-row${i === 0 ? " today" : ""}"><div class="week-day">${label}</div><div class="week-chips">${chips || '<span class="week-none">—</span>'}</div></div>`);
+      const wxLabel = wx ? weekWeatherLabel(wx, i) : "";
+      weekRows.push(`<div class="week-row${i === 0 ? " today" : ""}"><div class="week-day">${label}</div><div class="week-chips">${chips || '<span class="week-none">—</span>'}</div>${wxLabel ? `<div class="week-wx">${wxLabel}</div>` : ""}</div>`);
     }
     html += `<h2>📅 This week</h2><div class="card flat">${weekRows.join("")}</div>`;
   }
@@ -405,6 +447,13 @@ async function viewAddEdit(editId = null) {
         </select>
         <input type="text" id="pRoomNew" maxlength="40" placeholder="New room name (e.g. Sunroom)" style="margin-top:8px" hidden>
       </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="pOutdoor" ${editing && isOutdoorPlant(editing) ? "checked" : ""} style="width:18px;height:18px">
+          🏡 Lives outdoors (porch, balcony, garden)
+        </label>
+        <div class="hint">Outdoor plants get season- and weather-aware care: watering flexes with the season, and live weather flags rain, heat, and frost.</div>
+      </div>
       <div class="field-row">
         <div class="field">
           <label for="pWater">Water every (days)</label>
@@ -482,9 +531,14 @@ async function viewAddEdit(editId = null) {
 
   const roomSel = document.getElementById("pRoom");
   const roomNew = document.getElementById("pRoomNew");
+  const outdoorCb = document.getElementById("pOutdoor");
   roomSel.addEventListener("change", () => {
     roomNew.hidden = roomSel.value !== "__new__";
     if (!roomNew.hidden) roomNew.focus();
+    if (roomSel.value !== "__new__" && OUTDOOR_RE.test(roomSel.value)) outdoorCb.checked = true;
+  });
+  roomNew.addEventListener("input", () => {
+    if (OUTDOOR_RE.test(roomNew.value)) outdoorCb.checked = true;
   });
 
   document.getElementById("plantForm").addEventListener("submit", async e => {
@@ -504,6 +558,7 @@ async function viewAddEdit(editId = null) {
       state.settings.rooms = [...(state.settings.rooms || []), plant.location];
       await saveSettings();
     }
+    plant.outdoor = outdoorCb.checked;
     plant.waterEvery = parseInt(document.getElementById("pWater").value, 10) || 0;
     plant.fertEvery = parseInt(document.getElementById("pFert").value, 10) || 0;
     plant.lastWatered = document.getElementById("pLastWater").value || null;
@@ -550,7 +605,10 @@ async function viewPlant(id) {
     <div class="pill-row">
       ${badge(wDue, "water", "💧", "water")}
       ${badge(fDue, "fertilize", "🌾", "fertilize")}
+      ${isOutdoorPlant(p) ? `<span class="badge ok">🏡 outdoor</span>` : ""}
     </div>
+    ${isOutdoorPlant(p) && p.waterEvery && seasonFactor() !== 1 ? `
+      <p class="subtitle" style="margin-top:-6px">${currentSeason() === "winter" ? "❄️" : "☀️"} ${currentSeason()} adjusts outdoor watering: every ${p.waterEvery}d → ~${Math.max(1, Math.round(p.waterEvery * seasonFactor()))}d</p>` : ""}
     <div class="action-row">
       <button class="btn" id="btnWater">💧 Water now</button>
       <button class="btn secondary" id="btnFert">🌾 Fertilize</button>
@@ -704,6 +762,24 @@ async function viewSettings() {
     </div>
 
     <div class="card">
+      <h2 style="margin-top:0">🌤️ Weather & location</h2>
+      <p class="subtitle">Powers live rain, heat, and frost advice for outdoor plants (porch, balcony, garden). Your location is stored only on this device.</p>
+      ${weatherConfigured() ? `
+        <p class="subtitle">📍 <b>${esc(state.settings.weather.label || "Saved location")}</b></p>
+        <div class="pill-row">
+          <button class="pill ${weatherUnit() === "fahrenheit" ? "active" : ""}" data-unit="fahrenheit">°F</button>
+          <button class="pill ${weatherUnit() === "celsius" ? "active" : ""}" data-unit="celsius">°C</button>
+        </div>
+        <button class="btn small danger" id="wxClearBtn">Remove location</button>` : `
+        <button class="btn block secondary" id="wxGeoBtn" style="margin-bottom:10px">📍 Use my current location</button>
+        <form id="wxCityForm" class="inline-form">
+          <input type="text" id="wxCityInput" placeholder="…or search a city" maxlength="60">
+          <button class="btn secondary" type="submit">Search</button>
+        </form>
+        <div id="wxCityResults"></div>`}
+    </div>
+
+    <div class="card">
       <h2 style="margin-top:0">☁️ Real-time sync</h2>
       <p class="subtitle" id="syncStatus">${syncStatusText()}</p>
       ${syncConfigured() ? `
@@ -748,6 +824,69 @@ async function viewSettings() {
       <h2 style="margin-top:0">ℹ️ About</h2>
       <p class="subtitle" style="margin:0">Sprout 🌱 — a little plant-care tracker for two. Data lives on this device; with real-time sync on, it's shared only through your own private Supabase project.</p>
     </div>`;
+
+  const wxGeoBtn = document.getElementById("wxGeoBtn");
+  if (wxGeoBtn) {
+    wxGeoBtn.addEventListener("click", () => {
+      if (!navigator.geolocation) { toast("Geolocation not available — search a city instead"); return; }
+      wxGeoBtn.textContent = "📍 Locating…";
+      navigator.geolocation.getCurrentPosition(async pos => {
+        state.settings.weather = {
+          lat: Math.round(pos.coords.latitude * 100) / 100,
+          lon: Math.round(pos.coords.longitude * 100) / 100,
+          label: "My location", unit: weatherUnit()
+        };
+        await saveSettings();
+        await getWeather(true);
+        toast("Location saved 🌤️");
+        render();
+      }, () => {
+        wxGeoBtn.textContent = "📍 Use my current location";
+        toast("Couldn't get location — search a city instead");
+      }, { timeout: 10000 });
+    });
+    document.getElementById("wxCityForm").addEventListener("submit", async e => {
+      e.preventDefault();
+      const q = document.getElementById("wxCityInput").value.trim();
+      if (!q) return;
+      const box = document.getElementById("wxCityResults");
+      box.innerHTML = `<p class="subtitle">Searching…</p>`;
+      try {
+        const hits = await geocodeCity(q);
+        box.innerHTML = hits.length
+          ? hits.map((h, i) => `<button class="btn small secondary" style="margin:4px 4px 0 0" data-city="${i}">📍 ${esc(h.label)}</button>`).join("")
+          : `<p class="subtitle">No matches — try a bigger nearby city.</p>`;
+        box.querySelectorAll("[data-city]").forEach(btn => {
+          btn.addEventListener("click", async () => {
+            const h = hits[parseInt(btn.dataset.city, 10)];
+            state.settings.weather = { lat: h.lat, lon: h.lon, label: h.label, unit: weatherUnit() };
+            await saveSettings();
+            await getWeather(true);
+            toast("Location saved 🌤️");
+            render();
+          });
+        });
+      } catch {
+        box.innerHTML = `<p class="subtitle">Search failed — check your connection.</p>`;
+      }
+    });
+  }
+  const wxClearBtn = document.getElementById("wxClearBtn");
+  if (wxClearBtn) {
+    wxClearBtn.addEventListener("click", async () => {
+      state.settings.weather = null;
+      await saveSettings();
+      render();
+    });
+    document.querySelectorAll("[data-unit]").forEach(pill => {
+      pill.addEventListener("click", async () => {
+        state.settings.weather.unit = pill.dataset.unit;
+        await saveSettings();
+        await getWeather(true);
+        render();
+      });
+    });
+  }
 
   const syncForm = document.getElementById("syncForm");
   if (syncForm) {
