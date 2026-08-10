@@ -18,7 +18,7 @@
   <div id="app">
     <header class="topbar">
       <div class="topbar-inner">
-        <span class="brand">🌱 Sprout</span>
+        <span class="brand">Sprout</span>
         <button id="profileBtn" class="profile-chip" title="Switch who's caring today">👤</button>
       </div>
     </header>
@@ -26,11 +26,21 @@
     <main id="view" class="view"></main>
 
     <nav class="tabbar">
-      <a href="#/today" data-tab="today" class="tab"><span class="tab-icon">✅</span><span>Today</span></a>
-      <a href="#/plants" data-tab="plants" class="tab"><span class="tab-icon">🪴</span><span>Plants</span></a>
-      <a href="#/add" data-tab="add" class="tab tab-add"><span class="tab-icon">＋</span><span>Add</span></a>
-      <a href="#/guide" data-tab="guide" class="tab"><span class="tab-icon">📖</span><span>Guide</span></a>
-      <a href="#/settings" data-tab="settings" class="tab"><span class="tab-icon">⚙️</span><span>Settings</span></a>
+      <a href="#/today" data-tab="today" class="tab">
+        <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11.5l2.2 2.2L15.5 9"/><rect x="3.5" y="4.5" width="17" height="16" rx="3"/><path d="M8 2.5v4M16 2.5v4"/></svg>
+        <span>Today</span></a>
+      <a href="#/plants" data-tab="plants" class="tab">
+        <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21v-8"/><path d="M12 13c0-3.3 2.4-6 5.5-6 0 3.3-2.4 6-5.5 6z"/><path d="M12 15c0-3-2.2-5.5-5-5.5 0 3 2.2 5.5 5 5.5z"/></svg>
+        <span>Plants</span></a>
+      <a href="#/add" data-tab="add" class="tab tab-add">
+        <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12"/></svg>
+        <span>Add</span></a>
+      <a href="#/guide" data-tab="guide" class="tab">
+        <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 016.5 3H19v15.5H6.5A2.5 2.5 0 004 21z"/><path d="M9 7.5h6M9 11h4"/></svg>
+        <span>Guide</span></a>
+      <a href="#/settings" data-tab="settings" class="tab">
+        <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 14.5a1.6 1.6 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5V21a2 2 0 11-4 0v-.2a1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1H3a2 2 0 110-4h.2a1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.6 1.6 0 001.8.3 1.6 1.6 0 001-1.5V3a2 2 0 114 0v.2a1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.6 1.6 0 00-.3 1.8 1.6 1.6 0 001.5 1H21a2 2 0 110 4h-.2a1.6 1.6 0 00-1.5 1z"/></svg>
+        <span>Settings</span></a>
     </nav>
   </div>
 
@@ -39,6 +49,7 @@
   <script src="vendor/supabase.js"></script>
   <script src="plants-data.js"></script>
   <script src="weather.js"></script>
+  <script src="ai.js"></script>
   <script src="sync.js"></script>
   <script src="app.js"></script>
 </body>

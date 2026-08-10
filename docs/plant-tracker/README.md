@@ -27,6 +27,8 @@ Supabase project that you own (optional, ~5 min one-time setup).
 | Care guide: 20+ common houseplants with schedules & tips | **Guide** tab |
 | Seasonal suggestions (winter rest, summer watering, etc.) | Today + Guide tabs |
 | Two-person profiles — every action logs who did it | Top-right chip / **Settings** |
+| **AI health checks** — Claude reads your photos and care history, scores health, spots problems | Plant page → *Check health* |
+| **AI garden advisor** — Claude reasons over every plant + weather and ranks what needs doing | **Today** tab → *Advise me* |
 | **Real-time sync between both phones** (plants, photos, checklists) | **Settings** → Real-time sync |
 | Daily reminder notifications | **Settings** → Enable notifications |
 | Export/import backup (plants + history + photos in one file) | **Settings** |
@@ -49,6 +51,29 @@ Supabase project that you own (optional, ~5 min one-time setup).
    summary notification per day when plants are due.
 7. **Each day**: open the Today tab, tap the ✓ next to each due task.
    Done.
+
+## Sprout AI (optional)
+
+Sprout can hand your plants to **Claude** (Anthropic's AI) for two kinds of help:
+
+- **Per-plant health check** — on any plant's page, tap *Check health*. Claude looks at your
+  most recent photos (up to three, so it can judge the trend), the care history, the species,
+  the season, and the live weather, then returns a health score out of 10, what it can
+  actually see in the photos, specific problems with fixes, and any schedule changes worth
+  making. Each check is saved to that plant's history, so health is tracked over time.
+- **Garden advisor** — on the Today tab, tap *Advise me*. Claude reasons across every plant's
+  state, overdue care, past health checks, and today's weather, then tells you what to do
+  first and what can wait.
+
+**Setup:** Settings → Sprout AI → paste an Anthropic API key (get one at
+[console.anthropic.com](https://console.anthropic.com)). The key is stored only on that
+device — it is never synced, never in this repository. Calls are billed to your own Anthropic
+account and cost a few cents per check.
+
+Under the hood: `ai.js` calls the Messages API directly with photos as image blocks, a
+structured-output JSON schema (so the app always gets well-formed results), and server-side
+fallbacks for resilience. Refusals, bad keys, and rate limits all surface as plain messages
+rather than breaking the page.
 
 ## Real-time sync between your two phones
 
@@ -100,7 +125,10 @@ safety net.
    user-owned Supabase project — offline outbox, incremental pulls,
    realtime subscriptions, photo blobs in Supabase Storage, last-write-wins
    merges.
-8. **Tested**: automated browser run-throughs — app features end-to-end,
+8. **Design**: a minimal, Airbnb-inspired system — white surfaces, hairline
+   borders, generous whitespace, one restrained green accent, line-art icons,
+   and a full dark mode.
+9. **Tested**: automated browser run-throughs — app features end-to-end,
    plus a two-device sync test against a mock Supabase server (plant +
    photo created on phone A appear on phone B; phone B's watering shows up
    on phone A) — all green.
@@ -113,6 +141,7 @@ docs/plant-tracker/
 ├── styles.css           mobile-first styling (light + dark mode)
 ├── app.js               app logic (IndexedDB, router, views)
 ├── sync.js              real-time sync engine (outbox, pull, realtime)
+├── ai.js                Claude integration (health checks, garden advisor)
 ├── plants-data.js       species care guide + seasonal tips
 ├── sw.js                service worker (offline cache)
 ├── manifest.webmanifest PWA manifest

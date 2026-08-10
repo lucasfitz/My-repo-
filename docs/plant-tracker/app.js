@@ -78,7 +78,7 @@ async function saveSettings() {
   renderProfileChip();
 }
 function renderProfileChip() {
-  document.getElementById("profileBtn").textContent = "👤 " + state.settings.activeUser;
+  document.getElementById("profileBtn").textContent = state.settings.activeUser;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ async function logAction(plantId, type, note = "") {
   await saveRecord("plants", plant);
   await saveRecord("logs", { id: uid(), plantId, type, at: now, by: state.settings.activeUser, note });
   const verbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned", note: "Noted" };
-  toast(`${verbs[type] || type} ${plant.name} 🌿`);
+  toast(`${verbs[type] || type} ${plant.name}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +231,7 @@ async function viewToday() {
   const dateLine = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
   let html = `
-    <h1>${greeting}, ${esc(state.settings.activeUser)} 👋</h1>
+    <h1>${greeting}, ${esc(state.settings.activeUser)}</h1>
     <p class="subtitle">${dateLine}</p>
     <div class="stat-row">
       <div class="stat"><div class="num">${plants.filter(p => !p.archived).length}</div><div class="lbl">Plants</div></div>
@@ -244,7 +244,7 @@ async function viewToday() {
   if (hasOutdoor) {
     if (!weatherConfigured()) {
       html += `<div class="card flat wx-card">
-        <b>🌤️ Porch weather</b>
+        <b>Porch weather</b>
         <p class="subtitle" style="margin:6px 0 10px">Set your location once and your porch plants get live rain, heat, and frost advice.</p>
         <a class="btn small secondary" href="#/settings">Set location in Settings</a>
       </div>`;
@@ -264,7 +264,7 @@ async function viewToday() {
           : `<div class="wx-advice">✅ Nothing dramatic in the forecast — regular care applies.</div>`}
       </div>`;
     } else {
-      html += `<div class="card flat wx-card"><b>🌤️ Porch weather</b><p class="subtitle" style="margin:6px 0 0">Couldn't reach the weather service — using your normal schedule for now.</p></div>`;
+      html += `<div class="card flat wx-card"><b>Porch weather</b><p class="subtitle" style="margin:6px 0 0">Couldn't reach the weather service — using your normal schedule for now.</p></div>`;
     }
   }
 
@@ -296,7 +296,18 @@ async function viewToday() {
     return `<h2>${title}</h2>${items.join("")}`;
   };
 
-  html += await section("🔴 Overdue", overdue, "overdue");
+  // Garden-wide AI advisor: Claude reasons over every plant's state + care + weather
+  if (aiConfigured() && plants.some(p => !p.archived)) {
+    html += `<div class="card flat">
+      <div class="section-head" style="margin:0">
+        <h2 style="margin:0">Sprout AI advisor</h2>
+        <button class="btn small secondary" id="btnGardenAi">Advise me</button>
+      </div>
+      <div id="gardenAiResult"></div>
+    </div>`;
+  }
+
+  html += await section("Overdue", overdue, "overdue");
   html += await section("Due today", dueToday, "due-today");
 
   // Week-at-a-glance: which plants need water/fertilizer on each of the next 7 days
@@ -311,17 +322,17 @@ async function viewToday() {
       const wxLabel = wx ? weekWeatherLabel(wx, i) : "";
       weekRows.push(`<div class="week-row${i === 0 ? " today" : ""}"><div class="week-day">${label}</div><div class="week-chips">${chips || '<span class="week-none">—</span>'}</div>${wxLabel ? `<div class="week-wx">${wxLabel}</div>` : ""}</div>`);
     }
-    html += `<h2>📅 This week</h2><div class="card flat">${weekRows.join("")}</div>`;
+    html += `<h2>This week</h2><div class="card flat">${weekRows.join("")}</div>`;
   }
 
   if (!care.length && !plants.length) {
-    html += `<div class="empty"><div class="big">🪴</div><p>No plants yet!<br>Tap <b>Add</b> below to plant your first one.</p></div>`;
+    html += `<div class="empty"><div class="big">🪴</div><p>No plants yet.<br>Tap <b>Add</b> to plant your first one.</p></div>`;
   } else if (!overdue.length && !dueToday.length) {
-    html += `<div class="empty"><div class="big">🎉</div><p>All caught up — the jungle is happy.</p></div>`;
+    html += `<div class="empty"><div class="big">✓</div><p>All caught up.</p></div>`;
   }
 
   html += `
-    <div class="section-head"><h2>📝 Household checklist</h2></div>
+    <div class="section-head"><h2>Household checklist</h2></div>
     ${custom.map(t => `
       <div class="task" data-task="${t.id}">
         <button class="task-check ${t.done ? "done" : ""}" data-action="toggle-task">✓</button>
@@ -358,6 +369,21 @@ async function viewToday() {
       render();
     });
   });
+  const btnGardenAi = document.getElementById("btnGardenAi");
+  if (btnGardenAi) btnGardenAi.addEventListener("click", async () => {
+    const box = document.getElementById("gardenAiResult");
+    btnGardenAi.disabled = true;
+    btnGardenAi.textContent = "Thinking…";
+    try {
+      box.innerHTML = renderGardenInsights(await aiGardenInsights());
+    } catch (err) {
+      box.innerHTML = `<p class="subtitle" style="margin-top:10px">⚠️ ${esc(err.message)}</p>`;
+    } finally {
+      btnGardenAi.disabled = false;
+      btnGardenAi.textContent = "Advise me";
+    }
+  });
+
   document.getElementById("addTaskForm").addEventListener("submit", async e => {
     e.preventDefault();
     const title = document.getElementById("newTaskTitle").value.trim();
@@ -450,7 +476,7 @@ async function viewAddEdit(editId = null) {
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="pOutdoor" ${editing && isOutdoorPlant(editing) ? "checked" : ""} style="width:18px;height:18px">
-          🏡 Lives outdoors (porch, balcony, garden)
+          Lives outdoors (porch, balcony, garden)
         </label>
         <div class="hint">Outdoor plants get season- and weather-aware care: watering flexes with the season, and live weather flags rain, heat, and frost.</div>
       </div>
@@ -485,7 +511,7 @@ async function viewAddEdit(editId = null) {
         <label for="pPhoto">Photo</label>
         <input type="file" id="pPhoto" accept="image/*">
       </div>`}
-      <button class="btn block" type="submit">${editing ? "Save changes" : "🌱 Add plant"}</button>
+      <button class="btn block" type="submit">${editing ? "Save changes" : "Add plant"}</button>
       ${editing ? `<button class="btn block secondary" type="button" id="cancelEdit" style="margin-top:8px">Cancel</button>` : ""}
     </form>`;
 
@@ -568,9 +594,9 @@ async function viewAddEdit(editId = null) {
     if (!editing) {
       const file = document.getElementById("pPhoto").files[0];
       if (file) await addPhoto(plant.id, file);
-      await saveRecord("logs", { id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: state.settings.activeUser, note: "Added to the family 🎉" });
+      await saveRecord("logs", { id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: state.settings.activeUser, note: "Added to the collection" });
     }
-    toast(editing ? "Saved ✓" : `Welcome home, ${plant.name}! 🌱`);
+    toast(editing ? "Saved" : `Added ${plant.name}`);
     location.hash = "#/plant/" + plant.id;
   });
   const cancel = document.getElementById("cancelEdit");
@@ -595,8 +621,13 @@ async function viewPlant(id) {
     return `<span class="badge ${cls}">${icon} ${label} ${fmtDate(due)}</span>`;
   };
 
-  const logIcons = { water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️", note: "📝" };
+  const logIcons = { water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️", note: "📝", ai: "✨" };
   const logVerbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned" };
+  const logLine = (l) => {
+    if (l.type === "ai") return `Health check${typeof l.score === "number" ? ` ${l.score}/10` : ""} — ${esc(l.note)}`;
+    if (l.type === "note") return esc(l.note);
+    return (logVerbs[l.type] || l.type) + (l.note ? " — " + esc(l.note) : "");
+  };
 
   $view().innerHTML = `
     <div class="hero">${heroURL ? `<img src="${heroURL}" alt="${esc(p.name)}">` : `<div class="no-photo">${g.emoji}</div>`}</div>
@@ -605,45 +636,76 @@ async function viewPlant(id) {
     <div class="pill-row">
       ${badge(wDue, "water", "💧", "water")}
       ${badge(fDue, "fertilize", "🌾", "fertilize")}
-      ${isOutdoorPlant(p) ? `<span class="badge ok">🏡 outdoor</span>` : ""}
+      ${isOutdoorPlant(p) ? `<span class="badge ok">outdoor</span>` : ""}
     </div>
     ${isOutdoorPlant(p) && p.waterEvery && seasonFactor() !== 1 ? `
       <p class="subtitle" style="margin-top:-6px">${currentSeason() === "winter" ? "❄️" : "☀️"} ${currentSeason()} adjusts outdoor watering: every ${p.waterEvery}d → ~${Math.max(1, Math.round(p.waterEvery * seasonFactor()))}d</p>` : ""}
     <div class="action-row">
-      <button class="btn" id="btnWater">💧 Water now</button>
-      <button class="btn secondary" id="btnFert">🌾 Fertilize</button>
+      <button class="btn" id="btnWater">Water now</button>
+      <button class="btn secondary" id="btnFert">Fertilize</button>
     </div>
     <div class="action-row">
-      <button class="btn small secondary" id="btnRepot">🪴 Repotted</button>
-      <button class="btn small secondary" id="btnPrune">✂️ Pruned</button>
-      <button class="btn small secondary" id="btnEdit">✏️ Edit</button>
+      <button class="btn small secondary" id="btnRepot">Repotted</button>
+      <button class="btn small secondary" id="btnPrune">Pruned</button>
+      <button class="btn small secondary" id="btnEdit">Edit</button>
     </div>
 
-    <div class="tip-card"><b>${g.emoji} Care tips — ${esc(g.name)}</b><br>
-      ☀️ ${esc(g.light)}<br>💡 ${esc(g.tips)}</div>
+    <div class="tip-card"><b>Care tips — ${esc(g.name)}</b><br>
+      ${esc(g.light)}<br>${esc(g.tips)}</div>
+
+    <div class="card flat" id="aiCard">
+      <div class="section-head" style="margin:0">
+        <h2 style="margin:0">Sprout AI health check</h2>
+        ${(() => { const last = logs.find(l => l.type === "ai" && typeof l.score === "number"); return last ? aiScoreBadge(last.score) : ""; })()}
+      </div>
+      <p class="subtitle" style="margin:6px 0 10px">${aiConfigured()
+        ? "Claude looks at the photos, care history, and conditions to assess health and suggest care."
+        : "Add your Anthropic API key in Settings to enable AI health checks."}</p>
+      ${aiConfigured()
+        ? `<button class="btn secondary" id="btnAiCheck">Check health</button><div id="aiResult"></div>`
+        : `<a class="btn small secondary" href="#/settings">Set up in Settings</a>`}
+    </div>
 
     ${p.notes ? `<div class="card flat"><b>Notes</b><br>${esc(p.notes).replace(/\n/g, "<br>")}</div>` : ""}
 
-    <div class="section-head"><h2>📷 Photo journal</h2>
-      <label class="btn small secondary" style="cursor:pointer">＋ Photo<input type="file" id="photoInput" accept="image/*" hidden></label>
+    <div class="section-head"><h2>Photo journal</h2>
+      <label class="btn small secondary" style="cursor:pointer">Add photo<input type="file" id="photoInput" accept="image/*" hidden></label>
     </div>
     ${photos.length ? `<div class="gallery" id="gallery">
       ${photos.map(ph => `<img src="${URL.createObjectURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}
     </div>` : `<p class="subtitle">No photos yet — take a growth pic!</p>`}
 
-    <h2>📜 History</h2>
+    <h2>History</h2>
     <div class="card flat">
       ${logs.length ? logs.map(l => `
         <div class="history-item">
           <span class="history-icon">${logIcons[l.type] || "•"}</span>
-          <div><div>${l.type === "note" ? esc(l.note) : (logVerbs[l.type] || l.type) + (l.note ? " — " + esc(l.note) : "")}</div>
+          <div><div>${logLine(l)}</div>
           <div class="history-meta">${fmtDateTime(l.at)} · by ${esc(l.by)}</div></div>
         </div>`).join("") : `<p class="subtitle" style="margin:0">No history yet.</p>`}
     </div>
 
     <div style="margin-top:18px; display:flex; gap:10px">
-      <button class="btn small danger block" id="btnDelete">🗑 Remove plant</button>
+      <button class="btn small danger block" id="btnDelete">Remove plant</button>
     </div>`;
+
+  const btnAi = document.getElementById("btnAiCheck");
+  if (btnAi) btnAi.addEventListener("click", async () => {
+    const box = document.getElementById("aiResult");
+    btnAi.disabled = true;
+    btnAi.textContent = "Looking at your plant…";
+    box.innerHTML = "";
+    try {
+      const a = await aiAssessPlant(id);
+      box.innerHTML = renderAssessment(a);
+      btnAi.textContent = "Check again";
+    } catch (err) {
+      box.innerHTML = `<p class="subtitle" style="margin-top:10px">⚠️ ${esc(err.message)}</p>`;
+      btnAi.textContent = "Check health";
+    } finally {
+      btnAi.disabled = false;
+    }
+  });
 
   const act = async (type) => { await logAction(id, type); render(); };
   document.getElementById("btnWater").addEventListener("click", () => act("water"));
@@ -657,7 +719,7 @@ async function viewPlant(id) {
     const allLogs = await dbAllByIndex("logs", "plantId", id);
     for (const l of allLogs) await removeRecord("logs", l.id);
     await removeRecord("plants", id);
-    toast(`${p.name} removed 🥀`);
+    toast(`${p.name} removed`);
     location.hash = "#/plants";
   });
   document.getElementById("photoInput").addEventListener("change", async e => {
@@ -665,7 +727,7 @@ async function viewPlant(id) {
     if (!file) return;
     try {
       await addPhoto(id, file);
-      toast("Photo saved 📷");
+      toast("Photo saved");
       render();
     } catch { toast("Couldn't read that image"); }
   });
@@ -739,7 +801,7 @@ async function viewSettings() {
     <p class="subtitle">Household, reminders & backups.</p>
 
     <div class="card">
-      <h2 style="margin-top:0">👥 Household</h2>
+      <h2 style="margin-top:0">Household</h2>
       <p class="subtitle">Actions are logged under whoever is active — tap a name to switch (also in the top bar).</p>
       <div class="pill-row" id="userPills">
         ${state.settings.users.map(u => `<button class="pill ${u === state.settings.activeUser ? "active" : ""}" data-user="${esc(u)}">${esc(u)}</button>`).join("")}
@@ -751,18 +813,38 @@ async function viewSettings() {
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0">🔔 Reminders</h2>
+      <h2 style="margin-top:0">Reminders</h2>
       <p class="subtitle">When the app is open (or installed to your home screen), Sprout checks for due plants and sends a daily notification.</p>
       <button class="btn block secondary" id="notifBtn">
         ${notifState === "granted" ? "✓ Notifications enabled" : notifState === "denied" ? "Notifications blocked in browser settings" : notifState === "unsupported" ? "Not supported on this browser" : "Enable notifications"}
       </button>
       <p class="hint" style="margin-top:8px;color:var(--ink-soft);font-size:.78rem">
-        📲 Tip: on iPhone/Android, open this page in the browser and choose <b>Add to Home Screen</b> — Sprout works offline and feels like a native app.
+        Tip: on iPhone/Android, open this page in the browser and choose <b>Add to Home Screen</b> — Sprout works offline and feels like a native app.
       </p>
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0">🌤️ Weather & location</h2>
+      <h2 style="margin-top:0">Sprout AI</h2>
+      <p class="subtitle">Claude (Anthropic's AI) assesses plant health from your photos and reasons over your whole garden's care. Uses your own Anthropic API key — stored only on this device, calls billed to your Anthropic account (a few cents per check).</p>
+      ${aiConfigured() ? `
+        <p class="subtitle">✅ Connected · model: <b>Claude Opus</b></p>
+        <button class="btn small danger" id="aiClearBtn">Remove API key</button>` : `
+        <details style="margin-bottom:12px">
+          <summary style="cursor:pointer;font-weight:600">How to get an API key (~2 min)</summary>
+          <ol style="padding-left:18px;font-size:.85rem;margin-top:8px">
+            <li>Go to <b>console.anthropic.com</b> and create an account.</li>
+            <li>Add a small amount of credit under Billing (5 dollars goes a long way).</li>
+            <li>Create an API key under <b>API keys</b> and paste it below.</li>
+          </ol>
+        </details>
+        <form id="aiForm" class="inline-form">
+          <input type="password" id="aiKeyInput" placeholder="sk-ant-…" autocomplete="off">
+          <button class="btn" type="submit">Save</button>
+        </form>`}
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Weather &amp; location</h2>
       <p class="subtitle">Powers live rain, heat, and frost advice for outdoor plants (porch, balcony, garden). Your location is stored only on this device.</p>
       ${weatherConfigured() ? `
         <p class="subtitle">📍 <b>${esc(state.settings.weather.label || "Saved location")}</b></p>
@@ -771,7 +853,7 @@ async function viewSettings() {
           <button class="pill ${weatherUnit() === "celsius" ? "active" : ""}" data-unit="celsius">°C</button>
         </div>
         <button class="btn small danger" id="wxClearBtn">Remove location</button>` : `
-        <button class="btn block secondary" id="wxGeoBtn" style="margin-bottom:10px">📍 Use my current location</button>
+        <button class="btn block secondary" id="wxGeoBtn" style="margin-bottom:10px">Use my current location</button>
         <form id="wxCityForm" class="inline-form">
           <input type="text" id="wxCityInput" placeholder="…or search a city" maxlength="60">
           <button class="btn secondary" type="submit">Search</button>
@@ -780,16 +862,16 @@ async function viewSettings() {
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0">☁️ Real-time sync</h2>
+      <h2 style="margin-top:0">Real-time sync</h2>
       <p class="subtitle" id="syncStatus">${syncStatusText()}</p>
       ${syncConfigured() ? `
         <p class="subtitle">Household code: <b>${esc(state.settings.sync.household)}</b>. Both phones with this code share one live database — waterings, photos, and checklists appear on the other phone within seconds.</p>
         <div class="action-row">
-          <button class="btn secondary" id="syncNowBtn">🔄 Sync now</button>
+          <button class="btn secondary" id="syncNowBtn">Sync now</button>
           <button class="btn danger" id="syncOffBtn">Disconnect</button>
         </div>` : `
         <details style="margin-bottom:12px">
-          <summary style="cursor:pointer;font-weight:600">📋 One-time setup (~5 min, free)</summary>
+          <summary style="cursor:pointer;font-weight:600">One-time setup (~5 min, free)</summary>
           <ol style="padding-left:18px;font-size:.85rem;margin-top:8px">
             <li>Create a free account at <b>supabase.com</b> and make a <b>New project</b> (any name, e.g. "sprout").</li>
             <li>In the project, open <b>SQL Editor</b>, paste the setup script (button below), and press <b>Run</b>.</li>
@@ -797,7 +879,7 @@ async function viewSettings() {
             <li>Paste both below, pick any household code you like, and hit Connect.</li>
             <li>On the second phone: open this same Settings page and enter the <i>same</i> URL, key, and household code.</li>
           </ol>
-          <button class="btn small secondary" id="copySqlBtn" type="button">📄 Copy setup script</button>
+          <button class="btn small secondary" id="copySqlBtn" type="button">Copy setup script</button>
         </details>
         <form id="syncForm">
           <div class="field"><label for="syncUrl">Supabase project URL</label>
@@ -806,24 +888,41 @@ async function viewSettings() {
             <input type="text" id="syncKey" placeholder="eyJ… or sb_publishable_…" autocapitalize="off" autocorrect="off"></div>
           <div class="field"><label for="syncHome">Household code (same on both phones)</label>
             <input type="text" id="syncHome" placeholder="e.g. fitz-jungle-42" autocapitalize="off" autocorrect="off"></div>
-          <button class="btn block" type="submit">🔗 Connect</button>
+          <button class="btn block" type="submit">Connect</button>
         </form>`}
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0">💾 Backup</h2>
+      <h2 style="margin-top:0">Backup</h2>
       <p class="subtitle">Manual export/import of everything (plants, history, photos) — handy as an offline backup even with sync on.</p>
       <div class="action-row">
-        <button class="btn secondary" id="exportBtn">⬇️ Export backup</button>
-        <label class="btn secondary" style="cursor:pointer">⬆️ Import<input type="file" id="importInput" accept=".json,application/json" hidden></label>
+        <button class="btn secondary" id="exportBtn">Export backup</button>
+        <label class="btn secondary" style="cursor:pointer">Import<input type="file" id="importInput" accept=".json,application/json" hidden></label>
       </div>
       <p class="hint" style="color:var(--ink-soft);font-size:.78rem">Import merges by ID — newer entries win, nothing is duplicated.</p>
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0">ℹ️ About</h2>
+      <h2 style="margin-top:0">About</h2>
       <p class="subtitle" style="margin:0">Sprout 🌱 — a little plant-care tracker for two. Data lives on this device; with real-time sync on, it's shared only through your own private Supabase project.</p>
     </div>`;
+
+  const aiForm = document.getElementById("aiForm");
+  if (aiForm) aiForm.addEventListener("submit", async e => {
+    e.preventDefault();
+    const key = document.getElementById("aiKeyInput").value.trim();
+    if (!key) return;
+    state.settings.ai = { key };
+    await saveSettings();
+    toast("Sprout AI enabled");
+    render();
+  });
+  const aiClearBtn = document.getElementById("aiClearBtn");
+  if (aiClearBtn) aiClearBtn.addEventListener("click", async () => {
+    state.settings.ai = null;
+    await saveSettings();
+    render();
+  });
 
   const wxGeoBtn = document.getElementById("wxGeoBtn");
   if (wxGeoBtn) {
@@ -838,7 +937,7 @@ async function viewSettings() {
         };
         await saveSettings();
         await getWeather(true);
-        toast("Location saved 🌤️");
+        toast("Location saved");
         render();
       }, () => {
         wxGeoBtn.textContent = "📍 Use my current location";
@@ -862,7 +961,7 @@ async function viewSettings() {
             state.settings.weather = { lat: h.lat, lon: h.lon, label: h.label, unit: weatherUnit() };
             await saveSettings();
             await getWeather(true);
-            toast("Location saved 🌤️");
+            toast("Location saved");
             render();
           });
         });
@@ -891,7 +990,7 @@ async function viewSettings() {
   const syncForm = document.getElementById("syncForm");
   if (syncForm) {
     document.getElementById("copySqlBtn").addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(SYNC_SETUP_SQL); toast("Setup script copied 📄"); }
+      try { await navigator.clipboard.writeText(SYNC_SETUP_SQL); toast("Setup script copied"); }
       catch { prompt("Copy this script:", SYNC_SETUP_SQL); }
     });
     syncForm.addEventListener("submit", async e => {
@@ -903,7 +1002,7 @@ async function viewSettings() {
       state.settings.sync = { url, key, household, lastPullAt: "" };
       await saveSettings();
       const ok = await syncConnect(true);
-      if (ok) toast("Connected — syncing 🌐");
+      if (ok) toast("Connected — syncing");
       else { state.settings.sync = null; await saveSettings(); }
       render();
     });
@@ -944,7 +1043,7 @@ async function viewSettings() {
   document.getElementById("notifBtn").addEventListener("click", async () => {
     if (!("Notification" in window)) return;
     const perm = await Notification.requestPermission();
-    if (perm === "granted") { toast("Reminders on 🔔"); checkAndNotify(true); }
+    if (perm === "granted") { toast("Reminders on"); checkAndNotify(true); }
     render();
   });
   document.getElementById("exportBtn").addEventListener("click", exportBackup);
@@ -1055,7 +1154,7 @@ async function render() {
   try {
     await route.fn(m);
   } catch (err) {
-    $view().innerHTML = `<div class="empty"><div class="big">🥀</div><p>Something went wrong.<br>${esc(err.message)}</p></div>`;
+    $view().innerHTML = `<div class="empty"><div class="big">·</div><p>Something went wrong.<br>${esc(err.message)}</p></div>`;
   }
   window.scrollTo(0, 0);
 }
