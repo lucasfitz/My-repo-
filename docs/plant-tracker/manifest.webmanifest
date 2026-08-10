@@ -1,0 +1,14 @@
+{
+  "name": "Sprout — Plant Care Tracker",
+  "short_name": "Sprout",
+  "description": "Track your plants, watering & fertilizing schedules, photos, and daily care checklists.",
+  "start_url": "./#/today",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f7f6f2",
+  "theme_color": "#2f6b3f",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
