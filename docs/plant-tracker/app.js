@@ -5,7 +5,7 @@
 // IndexedDB wrapper
 // ---------------------------------------------------------------------------
 const DB_NAME = "sprout-db";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let _db = null;
 
 function openDB() {
@@ -25,6 +25,7 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains("tasks")) db.createObjectStore("tasks", { keyPath: "id" });
       if (!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath: "key" });
+      if (!db.objectStoreNames.contains("outbox")) db.createObjectStore("outbox", { keyPath: "id" });
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
@@ -49,6 +50,19 @@ const dbAllByIndex = (store, index, key) =>
   tx(store, "readonly", s => s.index(index).getAll(key));
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+// Synced mutations: write locally, stamp updatedAt, queue for cloud push.
+// (queuePush/queueDelete are no-ops until sync is configured — see sync.js.)
+async function saveRecord(store, rec) {
+  rec.updatedAt = new Date().toISOString();
+  await dbPut(store, rec);
+  await queuePush(store, rec.id);
+  return rec;
+}
+async function removeRecord(store, id) {
+  await dbDel(store, id);
+  await queueDelete(store, id);
+}
 
 // ---------------------------------------------------------------------------
 // Settings / household profiles
@@ -133,8 +147,8 @@ async function logAction(plantId, type, note = "") {
   const now = new Date().toISOString();
   if (type === "water") plant.lastWatered = todayStr();
   if (type === "fertilize") plant.lastFertilized = todayStr();
-  await dbPut("plants", plant);
-  await dbPut("logs", { id: uid(), plantId, type, at: now, by: state.settings.activeUser, note });
+  await saveRecord("plants", plant);
+  await saveRecord("logs", { id: uid(), plantId, type, at: now, by: state.settings.activeUser, note });
   const verbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned", note: "Noted" };
   toast(`${verbs[type] || type} ${plant.name} 🌿`);
 }
@@ -162,11 +176,11 @@ function resizeImage(file, maxDim = 1400) {
 
 async function addPhoto(plantId, file) {
   const blob = await resizeImage(file);
-  await dbPut("photos", { id: uid(), plantId, blob, createdAt: new Date().toISOString() });
+  await saveRecord("photos", { id: uid(), plantId, blob, createdAt: new Date().toISOString() });
 }
 
 async function latestPhotoURL(plantId) {
-  const photos = await dbAllByIndex("photos", "plantId", plantId);
+  const photos = (await dbAllByIndex("photos", "plantId", plantId)).filter(p => p.blob);
   if (!photos.length) return null;
   photos.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return URL.createObjectURL(photos[0].blob);
@@ -280,13 +294,13 @@ async function viewToday() {
       const id = e.target.closest(".task").dataset.task;
       const t = await dbGet("tasks", id);
       t.done = !t.done;
-      await dbPut("tasks", t);
+      await saveRecord("tasks", t);
       render();
     });
   });
   $view().querySelectorAll("[data-action=del-task]").forEach(btn => {
     btn.addEventListener("click", async e => {
-      await dbDel("tasks", e.target.closest(".task").dataset.task);
+      await removeRecord("tasks", e.target.closest(".task").dataset.task);
       render();
     });
   });
@@ -294,7 +308,7 @@ async function viewToday() {
     e.preventDefault();
     const title = document.getElementById("newTaskTitle").value.trim();
     if (!title) return;
-    await dbPut("tasks", { id: uid(), title, done: false, by: state.settings.activeUser, createdAt: new Date().toISOString() });
+    await saveRecord("tasks", { id: uid(), title, done: false, by: state.settings.activeUser, createdAt: new Date().toISOString() });
     render();
   });
 }
@@ -430,11 +444,11 @@ async function viewAddEdit(editId = null) {
     plant.lastWatered = document.getElementById("pLastWater").value || null;
     plant.lastFertilized = document.getElementById("pLastFert").value || null;
     plant.notes = document.getElementById("pNotes").value.trim();
-    await dbPut("plants", plant);
+    await saveRecord("plants", plant);
     if (!editing) {
       const file = document.getElementById("pPhoto").files[0];
       if (file) await addPhoto(plant.id, file);
-      await dbPut("logs", { id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: state.settings.activeUser, note: "Added to the family 🎉" });
+      await saveRecord("logs", { id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: state.settings.activeUser, note: "Added to the family 🎉" });
     }
     toast(editing ? "Saved ✓" : `Welcome home, ${plant.name}! 🌱`);
     location.hash = "#/plant/" + plant.id;
@@ -448,7 +462,7 @@ async function viewPlant(id) {
   const p = await dbGet("plants", id);
   if (!p) { location.hash = "#/plants"; return; }
   const g = guideEntry(p.speciesKey);
-  const photos = (await dbAllByIndex("photos", "plantId", id)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const photos = (await dbAllByIndex("photos", "plantId", id)).filter(ph => ph.blob).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const logs = (await dbAllByIndex("logs", "plantId", id)).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 30);
   const heroURL = photos.length ? URL.createObjectURL(photos[0].blob) : null;
 
@@ -462,6 +476,7 @@ async function viewPlant(id) {
   };
 
   const logIcons = { water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️", note: "📝" };
+  const logVerbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned" };
 
   $view().innerHTML = `
     <div class="hero">${heroURL ? `<img src="${heroURL}" alt="${esc(p.name)}">` : `<div class="no-photo">${g.emoji}</div>`}</div>
@@ -498,7 +513,7 @@ async function viewPlant(id) {
       ${logs.length ? logs.map(l => `
         <div class="history-item">
           <span class="history-icon">${logIcons[l.type] || "•"}</span>
-          <div><div>${l.type === "note" ? esc(l.note) : (l.type[0].toUpperCase() + l.type.slice(1) + "d") + (l.note ? " — " + esc(l.note) : "")}</div>
+          <div><div>${l.type === "note" ? esc(l.note) : (logVerbs[l.type] || l.type) + (l.note ? " — " + esc(l.note) : "")}</div>
           <div class="history-meta">${fmtDateTime(l.at)} · by ${esc(l.by)}</div></div>
         </div>`).join("") : `<p class="subtitle" style="margin:0">No history yet.</p>`}
     </div>
@@ -515,10 +530,10 @@ async function viewPlant(id) {
   document.getElementById("btnEdit").addEventListener("click", () => { location.hash = "#/edit/" + id; });
   document.getElementById("btnDelete").addEventListener("click", async () => {
     if (!confirm(`Remove ${p.name} and all its photos/history? This can't be undone.`)) return;
-    for (const ph of photos) await dbDel("photos", ph.id);
+    for (const ph of photos) await removeRecord("photos", ph.id);
     const allLogs = await dbAllByIndex("logs", "plantId", id);
-    for (const l of allLogs) await dbDel("logs", l.id);
-    await dbDel("plants", id);
+    for (const l of allLogs) await removeRecord("logs", l.id);
+    await removeRecord("plants", id);
     toast(`${p.name} removed 🥀`);
     location.hash = "#/plants";
   });
@@ -553,7 +568,7 @@ async function openPhotoViewer(photoId, plantId) {
   div.querySelector("#pvClose").addEventListener("click", () => div.remove());
   div.querySelector("#pvDelete").addEventListener("click", async () => {
     if (!confirm("Delete this photo?")) return;
-    await dbDel("photos", photoId);
+    await removeRecord("photos", photoId);
     div.remove();
     render();
   });
@@ -624,8 +639,39 @@ async function viewSettings() {
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0">💾 Backup & sharing</h2>
-      <p class="subtitle">Export everything (plants, history, photos) to a file. Share it with your partner's phone and import there to sync up.</p>
+      <h2 style="margin-top:0">☁️ Real-time sync</h2>
+      <p class="subtitle" id="syncStatus">${syncStatusText()}</p>
+      ${syncConfigured() ? `
+        <p class="subtitle">Household code: <b>${esc(state.settings.sync.household)}</b>. Both phones with this code share one live database — waterings, photos, and checklists appear on the other phone within seconds.</p>
+        <div class="action-row">
+          <button class="btn secondary" id="syncNowBtn">🔄 Sync now</button>
+          <button class="btn danger" id="syncOffBtn">Disconnect</button>
+        </div>` : `
+        <details style="margin-bottom:12px">
+          <summary style="cursor:pointer;font-weight:600">📋 One-time setup (~5 min, free)</summary>
+          <ol style="padding-left:18px;font-size:.85rem;margin-top:8px">
+            <li>Create a free account at <b>supabase.com</b> and make a <b>New project</b> (any name, e.g. "sprout").</li>
+            <li>In the project, open <b>SQL Editor</b>, paste the setup script (button below), and press <b>Run</b>.</li>
+            <li>Go to <b>Settings → API</b> and copy the <b>Project URL</b> and the <b>anon / publishable key</b>.</li>
+            <li>Paste both below, pick any household code you like, and hit Connect.</li>
+            <li>On the second phone: open this same Settings page and enter the <i>same</i> URL, key, and household code.</li>
+          </ol>
+          <button class="btn small secondary" id="copySqlBtn" type="button">📄 Copy setup script</button>
+        </details>
+        <form id="syncForm">
+          <div class="field"><label for="syncUrl">Supabase project URL</label>
+            <input type="text" id="syncUrl" placeholder="https://xxxx.supabase.co" autocapitalize="off" autocorrect="off"></div>
+          <div class="field"><label for="syncKey">Anon / publishable key</label>
+            <input type="text" id="syncKey" placeholder="eyJ… or sb_publishable_…" autocapitalize="off" autocorrect="off"></div>
+          <div class="field"><label for="syncHome">Household code (same on both phones)</label>
+            <input type="text" id="syncHome" placeholder="e.g. fitz-jungle-42" autocapitalize="off" autocorrect="off"></div>
+          <button class="btn block" type="submit">🔗 Connect</button>
+        </form>`}
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">💾 Backup</h2>
+      <p class="subtitle">Manual export/import of everything (plants, history, photos) — handy as an offline backup even with sync on.</p>
       <div class="action-row">
         <button class="btn secondary" id="exportBtn">⬇️ Export backup</button>
         <label class="btn secondary" style="cursor:pointer">⬆️ Import<input type="file" id="importInput" accept=".json,application/json" hidden></label>
@@ -635,8 +681,44 @@ async function viewSettings() {
 
     <div class="card">
       <h2 style="margin-top:0">ℹ️ About</h2>
-      <p class="subtitle" style="margin:0">Sprout 🌱 — a little plant-care tracker for two. All data lives on this device (nothing is uploaded anywhere).</p>
+      <p class="subtitle" style="margin:0">Sprout 🌱 — a little plant-care tracker for two. Data lives on this device; with real-time sync on, it's shared only through your own private Supabase project.</p>
     </div>`;
+
+  const syncForm = document.getElementById("syncForm");
+  if (syncForm) {
+    document.getElementById("copySqlBtn").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(SYNC_SETUP_SQL); toast("Setup script copied 📄"); }
+      catch { prompt("Copy this script:", SYNC_SETUP_SQL); }
+    });
+    syncForm.addEventListener("submit", async e => {
+      e.preventDefault();
+      const url = document.getElementById("syncUrl").value.trim().replace(/\/+$/, "");
+      const key = document.getElementById("syncKey").value.trim();
+      const household = document.getElementById("syncHome").value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+      if (!url || !key || !household) { toast("Fill in all three fields"); return; }
+      state.settings.sync = { url, key, household, lastPullAt: "" };
+      await saveSettings();
+      const ok = await syncConnect(true);
+      if (ok) toast("Connected — syncing 🌐");
+      else { state.settings.sync = null; await saveSettings(); }
+      render();
+    });
+  }
+  const syncNowBtn = document.getElementById("syncNowBtn");
+  if (syncNowBtn) {
+    syncNowBtn.addEventListener("click", async () => {
+      toast("Syncing…");
+      if (!SYNC.client) await syncConnect();
+      else { await syncFlushOutbox(); await syncPull(); }
+      toast(SYNC.status === "online" ? "Up to date ✓" : "Sync problem — see status");
+      render();
+    });
+    document.getElementById("syncOffBtn").addEventListener("click", async () => {
+      if (!confirm("Turn off sync on this phone? Local data stays; the cloud copy is untouched.")) return;
+      await syncDisconnect();
+      render();
+    });
+  }
 
   document.querySelectorAll("#userPills .pill").forEach(pill => {
     pill.addEventListener("click", async () => {
@@ -690,6 +772,7 @@ async function exportBackup() {
   ]);
   const photosOut = [];
   for (const ph of photos) {
+    if (!ph.blob) continue;
     photosOut.push({ id: ph.id, plantId: ph.plantId, createdAt: ph.createdAt, dataURL: await blobToDataURL(ph.blob) });
   }
   const payload = { app: "sprout", version: 1, exportedAt: new Date().toISOString(), settings: state.settings, plants, logs, tasks, photos: photosOut };
@@ -708,14 +791,14 @@ async function importBackup(file) {
     if (payload.app !== "sprout") throw new Error("not a Sprout backup");
     for (const p of payload.plants || []) {
       const existing = await dbGet("plants", p.id);
-      if (!existing || (p.lastWatered || "") > (existing.lastWatered || "")) await dbPut("plants", p);
+      if (!existing || (p.lastWatered || "") > (existing.lastWatered || "")) await saveRecord("plants", p);
     }
-    for (const l of payload.logs || []) await dbPut("logs", l);
-    for (const t of payload.tasks || []) await dbPut("tasks", t);
+    for (const l of payload.logs || []) await saveRecord("logs", l);
+    for (const t of payload.tasks || []) await saveRecord("tasks", t);
     for (const ph of payload.photos || []) {
       const existing = await dbGet("photos", ph.id);
       if (!existing) {
-        await dbPut("photos", { id: ph.id, plantId: ph.plantId, createdAt: ph.createdAt, blob: await dataURLToBlob(ph.dataURL) });
+        await saveRecord("photos", { id: ph.id, plantId: ph.plantId, createdAt: ph.createdAt, blob: await dataURLToBlob(ph.dataURL) });
       }
     }
     toast("Backup imported ✓");
@@ -792,6 +875,14 @@ async function render() {
   await render();
   checkAndNotify();
   setInterval(checkAndNotify, 60 * 60 * 1000); // hourly re-check while open
+
+  if (syncConfigured()) syncConnect().catch(() => {});
+  window.addEventListener("online", () => {
+    if (syncConfigured()) {
+      if (SYNC.client) { syncFlushOutbox().catch(() => {}); syncPull().catch(() => {}); }
+      else syncConnect().catch(() => {});
+    }
+  });
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});

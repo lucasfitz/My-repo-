@@ -6,9 +6,10 @@ built-in care guide. Built for two people (you and your wife) to share.
 
 **Live app:** https://lucasfitz.github.io/My-repo-/plant-tracker/
 
-No accounts, no servers, no build step — it's a plain HTML/CSS/JS Progressive
-Web App. All data is stored privately on each device (IndexedDB), including
-photos.
+No servers to run, no build step — it's a plain HTML/CSS/JS Progressive Web
+App. All data is stored locally on each device (IndexedDB), including photos,
+and stays in sync between your two phones in real time through a free
+Supabase project that you own (optional, ~5 min one-time setup).
 
 ---
 
@@ -26,6 +27,7 @@ photos.
 | Care guide: 20+ common houseplants with schedules & tips | **Guide** tab |
 | Seasonal suggestions (winter rest, summer watering, etc.) | Today + Guide tabs |
 | Two-person profiles — every action logs who did it | Top-right chip / **Settings** |
+| **Real-time sync between both phones** (plants, photos, checklists) | **Settings** → Real-time sync |
 | Daily reminder notifications | **Settings** → Enable notifications |
 | Export/import backup (plants + history + photos in one file) | **Settings** |
 | Works offline, installable to home screen (PWA) | Automatic |
@@ -39,30 +41,43 @@ photos.
 3. **Set your names**: Settings → Household → tap a profile → rename
    ("Lucas" and your wife's name). The top-right chip switches who's
    logging care actions.
-4. **Add your plants**: Add tab → pick the species (the schedule
+4. **Turn on sync** (once): follow the 4-step Supabase walkthrough below —
+   after that both phones share one live database.
+5. **Add your plants**: Add tab → pick the species (the schedule
    auto-fills with sensible defaults) → snap a photo.
-5. **Enable reminders**: Settings → Enable notifications. Sprout sends one
+6. **Enable reminders**: Settings → Enable notifications. Sprout sends one
    summary notification per day when plants are due.
-6. **Each day**: open the Today tab, tap the ✓ next to each due task.
+7. **Each day**: open the Today tab, tap the ✓ next to each due task.
    Done.
 
-## How sharing between two phones works
+## Real-time sync between your two phones
 
-Each phone keeps its own copy of the data (nothing is uploaded anywhere).
-To sync up: **Settings → Export backup** on one phone, share the file
-(AirDrop/Messages/email), then **Settings → Import** on the other. Import
-merges by ID — newer waterings win and nothing duplicates, so syncing in
-either direction is safe.
+Sync runs through a **free Supabase project that you create and own** — the
+app itself stays a static page with no keys in it. One-time setup:
 
-In practice the easiest routine is: one phone is the "source of truth" you
-both check off from, and you export a backup to the other occasionally as
-insurance.
+1. One of you creates a free account at [supabase.com](https://supabase.com)
+   and makes a **New project** (any name works).
+2. In the project, open **SQL Editor**, paste the setup script (the app's
+   **Settings → Real-time sync → Copy setup script** button has it), and
+   press **Run**. This creates one `records` table and a `plant-photos`
+   storage bucket.
+3. In Supabase **Settings → API**, copy the **Project URL** and the
+   **anon / publishable key**.
+4. In Sprout on *each* phone: **Settings → Real-time sync**, paste the URL
+   and key, enter the *same* household code, and hit **Connect**.
 
-> **Want real-time sync?** The natural upgrade is adding a small backend
-> (Supabase or Firebase both have free tiers): move the IndexedDB reads and
-> writes in `app.js` behind a sync layer, and both phones share one
-> database with live updates. The data model here (plants / logs / photos /
-> tasks keyed by ID) maps 1:1 onto that.
+From then on, waterings, new plants, photos, and checklist items appear on
+the other phone within seconds. Everything still works offline — changes
+queue up locally (an "outbox") and push automatically when you're back
+online; conflicts resolve last-write-wins per record.
+
+Privacy note: your data lives only on your phones and in *your* Supabase
+project. The URL/key are stored on-device, never in this repository. Anyone
+with your key + household code could read the data, so don't share them —
+for a plant tracker this "household password" model is a sensible tradeoff.
+
+The manual **Export/Import backup** in Settings still works as an offline
+safety net.
 
 ## How it was built (the 0→1 steps)
 
@@ -81,8 +96,14 @@ insurance.
    advice. Selecting a species pre-fills its schedule.
 6. **PWA layer**: manifest + service worker for offline use and
    home-screen install; daily notification when tasks are due.
-7. **Tested**: automated browser run-through (add plants, complete tasks,
-   upload photos, switch profiles, export) — all green.
+7. **Real-time sync**: local-first sync engine (`sync.js`) over a
+   user-owned Supabase project — offline outbox, incremental pulls,
+   realtime subscriptions, photo blobs in Supabase Storage, last-write-wins
+   merges.
+8. **Tested**: automated browser run-throughs — app features end-to-end,
+   plus a two-device sync test against a mock Supabase server (plant +
+   photo created on phone A appear on phone B; phone B's watering shows up
+   on phone A) — all green.
 
 ## Files
 
@@ -90,10 +111,12 @@ insurance.
 docs/plant-tracker/
 ├── index.html           app shell
 ├── styles.css           mobile-first styling (light + dark mode)
-├── app.js               all app logic (IndexedDB, router, views)
+├── app.js               app logic (IndexedDB, router, views)
+├── sync.js              real-time sync engine (outbox, pull, realtime)
 ├── plants-data.js       species care guide + seasonal tips
 ├── sw.js                service worker (offline cache)
 ├── manifest.webmanifest PWA manifest
+├── vendor/supabase.js   supabase-js client (self-hosted, MIT)
 └── icons/               app icons
 ```
 
