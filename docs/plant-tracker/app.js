@@ -327,6 +327,26 @@ async function viewToday() {
     html += `<h2>This week</h2><div class="card flat">${weekRows.join("")}</div>`;
   }
 
+  const ailing = plants
+    .filter(p => !p.archived && p.health && p.health.score <= 5)
+    .sort((a, b) => a.health.score - b.health.score);
+  if (ailing.length) {
+    html += `
+      <div class="section-head"><h2>Needs a look</h2></div>
+      <div class="card flat">
+        ${ailing.map(p => {
+          const step = (p.health.actions || [])[0];
+          return `<a class="ailing" href="#/plant/${p.id}">
+            ${healthChip(p.health)}
+            <div class="ailing-main">
+              <div class="ailing-name">${esc(p.name)}</div>
+              <div class="ailing-note">${esc(step ? step.title : p.health.summary)}</div>
+            </div>
+          </a>`;
+        }).join("")}
+      </div>`;
+  }
+
   if (!care.length && !plants.length) {
     html += `<div class="empty"><div class="big">🪴</div><p>No plants yet.<br>Tap <b>Add</b> to plant your first one.</p></div>`;
   } else if (!overdue.length && !dueToday.length) {
@@ -339,7 +359,7 @@ async function viewToday() {
       <div class="task" data-task="${t.id}">
         <button class="task-check ${t.done ? "done" : ""}" data-action="toggle-task">✓</button>
         <div class="task-body"><div class="task-title" style="${t.done ? "text-decoration:line-through;opacity:.55" : ""}">${esc(t.title)}</div>
-        <div class="task-sub">added by ${esc(t.by || "?")}</div></div>
+        <div class="task-sub">${t.plantName ? `${esc(t.plantName)} · ` : ""}${t.when ? `${esc(t.when)} · ` : ""}added by ${esc(t.by || "?")}</div></div>
         <button class="btn small danger" data-action="del-task">✕</button>
       </div>`).join("")}
     <form id="addTaskForm" class="inline-form" style="margin-top:10px">
@@ -423,7 +443,7 @@ async function viewPlants() {
         <div class="plant-card-body">
           <div class="plant-card-name">${esc(p.name)}</div>
           <div class="plant-card-sub">${esc(p.species || "")}${p.location ? " · " + esc(p.location) : ""}</div>
-          ${chip}
+          <div class="plant-card-chips">${chip}${healthChip(p.health)}</div>
         </div>
       </a>`;
   }));
@@ -888,6 +908,79 @@ async function viewAddEdit(editId = null) {
   }
 }
 
+// A recommendation is only worth anything if acting on it is one tap. "Add
+// step" puts it on the shared checklist; "Apply" rewrites the care plan itself.
+async function addStepAsTask(plant, action, taskId) {
+  await saveRecord("tasks", {
+    id: taskId,
+    title: action.title,
+    done: false,
+    by: "Sprout AI",
+    plantId: plant.id,
+    plantName: plant.name,
+    when: action.when,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+async function applyStepToPlan(plant, action) {
+  const changes = [];
+  if (action.water_every_days > 0 && action.water_every_days !== plant.waterEvery) {
+    changes.push(`water every ${plant.waterEvery || "—"}d → ${action.water_every_days}d`);
+    plant.waterEvery = action.water_every_days;
+  }
+  if (action.fert_every_days > 0 && action.fert_every_days !== plant.fertEvery) {
+    changes.push(`fertilize every ${plant.fertEvery || "—"}d → ${action.fert_every_days}d`);
+    plant.fertEvery = action.fert_every_days;
+  }
+  if (!changes.length) return null;
+  await saveRecord("plants", plant);
+  await saveRecord("logs", {
+    id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(),
+    by: state.settings.activeUser,
+    note: `Care plan updated from a health check — ${changes.join("; ")}`,
+  });
+  return changes.join("; ");
+}
+
+function wireSteps(box, plant) {
+  if (!box || !plant.health || !plant.health.actions) return;
+  const actions = plant.health.actions;
+  const at = plant.health.at;
+
+  box.querySelectorAll("[data-add]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const i = Number(btn.dataset.add);
+      await addStepAsTask(plant, actions[i], actionTaskId(plant.id, at, i));
+      btn.disabled = true;
+      btn.textContent = "On the list ✓";
+      toast("Added to the checklist");
+    });
+  });
+
+  box.querySelectorAll("[data-apply]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const changed = await applyStepToPlan(plant, actions[Number(btn.dataset.apply)]);
+      toast(changed ? "Care plan updated" : "Already set that way");
+      if (changed) render();
+    });
+  });
+
+  const all = box.querySelector("#addAllSteps");
+  if (all) all.addEventListener("click", async () => {
+    let n = 0;
+    for (let i = 0; i < actions.length; i++) {
+      const btn = box.querySelector(`[data-add="${i}"]`);
+      if (!btn || btn.disabled) continue;
+      await addStepAsTask(plant, actions[i], actionTaskId(plant.id, at, i));
+      btn.disabled = true;
+      btn.textContent = "On the list ✓";
+      n++;
+    }
+    toast(n ? `Added ${n} step${n > 1 ? "s" : ""} to the checklist` : "Already on the list");
+  });
+}
+
 // ----- Plant detail -----
 async function viewPlant(id) {
   const p = await dbGet("plants", id);
@@ -895,6 +988,7 @@ async function viewPlant(id) {
   const g = guideEntry(p.speciesKey);
   const photos = (await dbAllByIndex("photos", "plantId", id)).filter(ph => ph.blob).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const logs = (await dbAllByIndex("logs", "plantId", id)).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 30);
+  const addedIds = (await dbAll("tasks")).map(t => t.id);
   const heroURL = photos.length ? URL.createObjectURL(photos[0].blob) : null;
 
   const wDue = nextDue(p, "water"), fDue = nextDue(p, "fertilize");
@@ -927,6 +1021,7 @@ async function viewPlant(id) {
       ${badge(wDue, "water", "💧", "water")}
       ${badge(fDue, "fertilize", "🌾", "fertilize")}
       ${isOutdoorPlant(p) ? `<span class="badge ok">outdoor</span>` : ""}
+      ${healthChip(p.health)}
     </div>
     ${isOutdoorPlant(p) && p.waterEvery && seasonFactor() !== 1 ? `
       <p class="subtitle" style="margin-top:-6px">${currentSeason() === "winter" ? "❄️" : "☀️"} ${currentSeason()} adjusts outdoor watering: every ${p.waterEvery}d → ~${Math.max(1, Math.round(p.waterEvery * seasonFactor()))}d</p>` : ""}
@@ -945,14 +1040,17 @@ async function viewPlant(id) {
 
     <div class="card flat" id="aiCard">
       <div class="section-head" style="margin:0">
-        <h2 style="margin:0">Sprout AI health check</h2>
-        ${(() => { const last = logs.find(l => l.type === "ai" && typeof l.score === "number"); return last ? aiScoreBadge(last.score) : ""; })()}
+        <h2 style="margin:0">Health</h2>
+        ${healthChip(p.health, { withLabel: true })}
       </div>
       <p class="subtitle" style="margin:6px 0 10px">${aiConfigured()
-        ? "Claude looks at the photos, care history, and conditions to assess health and suggest care."
+        ? p.health
+          ? `Last checked ${fmtDate(p.health.at.slice(0, 10))} from the photos, care history, and conditions.`
+          : "Claude reads the photos, care history, and conditions to assess health and turn what it finds into steps."
         : "Add your Anthropic API key in Settings to enable AI health checks."}</p>
       ${aiConfigured()
-        ? `<button class="btn secondary" id="btnAiCheck">Check health</button><div id="aiResult"></div>`
+        ? `<button class="btn secondary" id="btnAiCheck">${p.health ? "Check again" : "Check health"}</button>
+           <div id="aiResult">${p.health ? renderAssessment(p.health, { plantId: p.id, addedIds }) : ""}</div>`
         : `<a class="btn small secondary" href="#/settings">Set up in Settings</a>`}
     </div>
 
@@ -980,22 +1078,24 @@ async function viewPlant(id) {
     </div>`;
 
   const btnAi = document.getElementById("btnAiCheck");
-  if (btnAi) btnAi.addEventListener("click", async () => {
+  if (btnAi) {
     const box = document.getElementById("aiResult");
-    btnAi.disabled = true;
-    btnAi.textContent = "Looking at your plant…";
-    box.innerHTML = "";
-    try {
-      const a = await aiAssessPlant(id);
-      box.innerHTML = renderAssessment(a);
-      btnAi.textContent = "Check again";
-    } catch (err) {
-      box.innerHTML = `<p class="subtitle" style="margin-top:10px">⚠️ ${esc(err.message)}</p>`;
-      btnAi.textContent = "Check health";
-    } finally {
-      btnAi.disabled = false;
-    }
-  });
+    wireSteps(box, p);
+    btnAi.addEventListener("click", async () => {
+      btnAi.disabled = true;
+      btnAi.textContent = "Looking at your plant…";
+      box.innerHTML = "";
+      try {
+        await aiAssessPlant(id);
+        render();  // the score belongs on the pill row and the grid too, not just here
+      } catch (err) {
+        box.innerHTML = `<p class="subtitle" style="margin-top:10px">⚠️ ${esc(err.message)}</p>`;
+        btnAi.textContent = "Check health";
+      } finally {
+        btnAi.disabled = false;
+      }
+    });
+  }
 
   const act = async (type) => { await logAction(id, type); render(); };
   document.getElementById("btnWater").addEventListener("click", () => act("water"));
@@ -1184,6 +1284,42 @@ async function viewSettings() {
     </div>
 
     <div class="card">
+      <h2 style="margin-top:0">Calendar</h2>
+      <p class="subtitle">Put the next month of watering and fertilizing on a calendar — one entry a day, listing what needs doing.</p>
+
+      <div class="cal-block">
+        <b>Download once</b>
+        <p class="subtitle" style="margin:4px 0 10px">A .ics file you can open in any calendar app. No accounts, but it's a snapshot — re-download after schedules change.</p>
+        <button class="btn block secondary" id="icsBtn">Download .ics</button>
+      </div>
+
+      <div class="cal-block">
+        <b>Or keep it in sync with Google</b>
+        ${calConnected() ? `
+          <p class="subtitle" style="margin:4px 0 10px">🟢 Connected. Sprout writes to its own <b>${esc(CAL_NAME)}</b> calendar — never your main one.${
+            calSettings().lastSync ? ` Last synced ${fmtDateTime(calSettings().lastSync)}.` : ""}</p>
+          <button class="btn block" id="calSyncBtn">Sync now</button>
+          <button class="btn block secondary" id="calOffBtn" style="margin-top:8px">Disconnect</button>
+          <div id="calMsg"></div>` : `
+          <p class="subtitle" style="margin:4px 0 10px">Needs a Google OAuth client ID — a one-time setup in Google Cloud, free. <button type="button" class="link-btn" id="calHelpBtn">How</button></p>
+          <div id="calHelp" hidden>
+            <ol class="setup-steps">
+              <li>Open <b>console.cloud.google.com</b> and make a project (any name).</li>
+              <li>Under <b>APIs &amp; Services → Library</b>, enable <b>Google Calendar API</b>.</li>
+              <li>Under <b>OAuth consent screen</b>, pick <b>External</b>, fill in the name and your email, and add both of your Google addresses under <b>Test users</b>. Leave it in Testing — it never needs review for just the two of you.</li>
+              <li>Under <b>Credentials → Create credentials → OAuth client ID</b>, choose <b>Web application</b>, and add this exact origin under <b>Authorized JavaScript origins</b>:<br><code class="origin-code">${esc(location.origin)}</code></li>
+              <li>Copy the client ID (ends in <b>.apps.googleusercontent.com</b>) and paste it below.</li>
+            </ol>
+          </div>
+          <form id="calForm" class="inline-form">
+            <input type="text" id="calClientId" placeholder="…apps.googleusercontent.com" autocomplete="off" value="${esc(calSettings().clientId || "")}">
+            <button class="btn" type="submit">Connect</button>
+          </form>
+          <div id="calMsg"></div>`}
+      </div>
+    </div>
+
+    <div class="card">
       <h2 style="margin-top:0">Real-time sync</h2>
       <p class="subtitle" id="syncStatus">${syncStatusText()}</p>
       ${syncConfigured() ? `
@@ -1244,6 +1380,73 @@ async function viewSettings() {
   if (aiClearBtn) aiClearBtn.addEventListener("click", async () => {
     state.settings.ai = null;
     await saveSettings();
+    render();
+  });
+
+  // ----- Calendar -----
+  const icsBtn = document.getElementById("icsBtn");
+  if (icsBtn) icsBtn.addEventListener("click", async () => {
+    try {
+      const days = await downloadCareICS();
+      toast(`Exported ${days} day${days > 1 ? "s" : ""} of care`);
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  const calHelpBtn = document.getElementById("calHelpBtn");
+  if (calHelpBtn) calHelpBtn.addEventListener("click", () => {
+    const help = document.getElementById("calHelp");
+    help.hidden = !help.hidden;
+    calHelpBtn.textContent = help.hidden ? "How" : "Hide";
+  });
+
+  const calForm = document.getElementById("calForm");
+  if (calForm) calForm.addEventListener("submit", async e => {
+    e.preventDefault();
+    const msg = document.getElementById("calMsg");
+    const clientId = document.getElementById("calClientId").value.trim();
+    if (!clientId) return;
+    msg.innerHTML = `<p class="subtitle">Opening Google…</p>`;
+    state.settings.calendar = { clientId };
+    await saveSettings();
+    try {
+      await calConnect();
+      const { written } = await calSync();
+      toast(`Calendar connected — ${written} day${written === 1 ? "" : "s"} added`);
+      render();
+    } catch (err) {
+      state.settings.calendar = { clientId };  // keep the id so it isn't retyped
+      await saveSettings();
+      msg.innerHTML = `<p class="subtitle">⚠️ ${esc(err.message)}</p>`;
+    }
+  });
+
+  const calSyncBtn = document.getElementById("calSyncBtn");
+  if (calSyncBtn) calSyncBtn.addEventListener("click", async () => {
+    const msg = document.getElementById("calMsg");
+    calSyncBtn.disabled = true;
+    calSyncBtn.textContent = "Syncing…";
+    try {
+      const { written } = await calSync();
+      msg.innerHTML = `<p class="subtitle">✓ ${written} day${written === 1 ? "" : "s"} of care on your calendar.</p>`;
+    } catch (err) {
+      msg.innerHTML = `<p class="subtitle">⚠️ ${esc(err.message)}</p>`;
+    } finally {
+      calSyncBtn.disabled = false;
+      calSyncBtn.textContent = "Sync now";
+    }
+  });
+
+  const calOffBtn = document.getElementById("calOffBtn");
+  if (calOffBtn) calOffBtn.addEventListener("click", async () => {
+    const alsoDelete = confirm("Also delete the Sprout calendar from Google, with its entries?");
+    try {
+      await calDisconnect({ removeCalendar: alsoDelete });
+      toast("Calendar disconnected");
+    } catch (err) {
+      toast(err.message);
+    }
     render();
   });
 
@@ -1529,6 +1732,7 @@ async function render() {
   setInterval(checkAndNotify, 60 * 60 * 1000); // hourly re-check while open
 
   if (syncConfigured()) syncConnect().catch(() => {});
+  maybeAutoSyncCalendar();
   window.addEventListener("online", () => {
     if (syncConfigured()) {
       if (SYNC.client) { syncFlushOutbox().catch(() => {}); syncPull().catch(() => {}); }

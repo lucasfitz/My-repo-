@@ -128,10 +128,36 @@ const HEALTH_SCHEMA = {
         additionalProperties: false
       }
     },
-    care_adjustments: { type: "array", items: { type: "string" },
-      description: "Changes to the watering/fertilizing/light routine, if any are warranted" }
+    actions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string",
+            description: "One instruction, phrased so it can be done without thinking further — " +
+              "'Move it 3 ft back from the south window', not 'consider light levels'"
+          },
+          detail: { type: "string", description: "One line on why this, tied to what you saw" },
+          kind: { type: "string", enum: ["water", "fertilize", "repot", "prune", "move", "treat", "inspect", "other"] },
+          when: { type: "string", enum: ["today", "this week", "ongoing"] },
+          water_every_days: {
+            type: "integer",
+            description: "New watering interval in days if the routine itself should change; 0 to leave the schedule alone"
+          },
+          fert_every_days: {
+            type: "integer",
+            description: "New fertilizing interval in days if the routine itself should change; 0 to leave the schedule alone"
+          }
+        },
+        required: ["title", "detail", "kind", "when", "water_every_days", "fert_every_days"],
+        additionalProperties: false
+      },
+      description: "Concrete steps, most important first. Every issue above needs a step here that fixes it. " +
+        "Set an interval field only when the standing schedule is wrong — a one-off soak is an action, not a schedule change."
+    }
   },
-  required: ["health_score", "status", "trend", "summary", "observations", "issues", "care_adjustments"],
+  required: ["health_score", "status", "trend", "summary", "observations", "issues", "actions"],
   additionalProperties: false
 };
 
@@ -175,13 +201,22 @@ ${describeCareHistory(logs) || "(none recorded)"}`,
     schema: HEALTH_SCHEMA,
   });
 
+  const at = new Date().toISOString();
   // Persist as a care-history entry so health tracks over time (and syncs)
   await saveRecord("logs", {
-    id: uid(), plantId, type: "ai", at: new Date().toISOString(),
+    id: uid(), plantId, type: "ai", at,
     by: "Sprout AI", note: result.summary,
     score: result.health_score, status: result.status,
   });
-  return result;
+  // ...and on the plant itself, so its health and the steps it needs survive
+  // leaving the screen, and show up on both phones.
+  plant.health = {
+    score: result.health_score, status: result.status, trend: result.trend,
+    summary: result.summary, observations: result.observations,
+    issues: result.issues, actions: result.actions, at,
+  };
+  await saveRecord("plants", plant);
+  return plant.health;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,20 +349,75 @@ function aiScoreBadge(score) {
   return `<span class="badge ${cls}">${score}/10</span>`;
 }
 
-function renderAssessment(a) {
+// The at-a-glance indicator: a dot whose colour is the health band, used on
+// plant cards and anywhere a plant is named.
+function healthChip(health, { withLabel = false } = {}) {
+  if (!health || typeof health.score !== "number") return "";
+  const band = health.score >= 8 ? "good" : health.score >= 5 ? "fair" : "poor";
+  return `<span class="health-chip ${band}" title="Health ${health.score}/10 — ${esc(health.status)}">
+    <span class="health-dot"></span>${health.score}/10${withLabel ? ` · ${esc(health.status)}` : ""}</span>`;
+}
+
+const ACTION_ICONS = {
+  water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️",
+  move: "↔️", treat: "🧴", inspect: "🔍", other: "•",
+};
+
+// A step's identity has to survive a re-render so an added step still reads as
+// added — derived from the plant and the moment of the assessment, not random.
+function actionTaskId(plantId, at, i) {
+  return `ai_${plantId}_${Date.parse(at).toString(36)}_${i}`;
+}
+
+function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
   const trendIcon = { improving: "↗", stable: "→", declining: "↘", unknown: "" }[a.trend] || "";
+  const actions = a.actions || [];
+  const steps = actions.map((act, i) => {
+    const taskId = actionTaskId(plantId, a.at || "", i);
+    const added = addedIds.includes(taskId);
+    const plan = act.water_every_days > 0 || act.fert_every_days > 0;
+    const planLabel = [
+      act.water_every_days > 0 ? `water every ${act.water_every_days}d` : "",
+      act.fert_every_days > 0 ? `fertilize every ${act.fert_every_days}d` : "",
+    ].filter(Boolean).join(", ");
+    return `
+      <div class="act" data-act="${i}">
+        <span class="act-icon">${ACTION_ICONS[act.kind] || "•"}</span>
+        <div class="act-main">
+          <div class="act-title">${esc(act.title)}</div>
+          ${act.detail ? `<div class="act-detail">${esc(act.detail)}</div>` : ""}
+          <div class="act-meta">
+            <span class="act-when">${esc(act.when)}</span>
+            ${plan ? `<span class="act-plan">changes the plan → ${esc(planLabel)}</span>` : ""}
+          </div>
+        </div>
+        <div class="act-buttons">
+          ${plan ? `<button class="btn small" type="button" data-apply="${i}">Apply</button>` : ""}
+          <button class="btn small secondary" type="button" data-add="${i}" ${added ? "disabled" : ""}>${added ? "On the list ✓" : "Add step"}</button>
+        </div>
+      </div>`;
+  }).join("");
+
   return `
     <div class="ai-result">
       <div class="ai-head">
-        ${aiScoreBadge(a.health_score)}
+        ${aiScoreBadge(a.score)}
         <b>${esc(a.status[0].toUpperCase() + a.status.slice(1))}</b>
         ${a.trend !== "unknown" ? `<span class="ai-trend">${trendIcon} ${esc(a.trend)}</span>` : ""}
+        ${a.at ? `<span class="ai-when">${fmtDate(a.at.slice(0, 10))}</span>` : ""}
       </div>
       <p class="ai-summary">${esc(a.summary)}</p>
-      ${a.observations.length ? `<div class="ai-section"><b>Observed</b>${a.observations.map(o => `<div class="ai-item">· ${esc(o)}</div>`).join("")}</div>` : ""}
-      ${a.issues.length ? `<div class="ai-section"><b>Issues</b>${a.issues.map(i =>
+      ${(a.observations || []).length ? `<div class="ai-section"><b>Observed</b>${a.observations.map(o => `<div class="ai-item">· ${esc(o)}</div>`).join("")}</div>` : ""}
+      ${(a.issues || []).length ? `<div class="ai-section"><b>Issues</b>${a.issues.map(i =>
         `<div class="ai-item ai-issue-${i.severity}">· <b>${esc(i.issue)}</b> — ${esc(i.action)}</div>`).join("")}</div>` : ""}
-      ${a.care_adjustments.length ? `<div class="ai-section"><b>Adjust care</b>${a.care_adjustments.map(c => `<div class="ai-item">· ${esc(c)}</div>`).join("")}</div>` : ""}
+      ${steps ? `
+        <div class="ai-section">
+          <div class="act-head">
+            <b>What to do</b>
+            <button class="btn small secondary" type="button" id="addAllSteps">Add all to checklist</button>
+          </div>
+          ${steps}
+        </div>` : ""}
     </div>`;
 }
 

@@ -372,6 +372,62 @@ body.sheet-open { overflow: hidden; }
   object-fit: cover; background: var(--surface-sunk);
 }
 
+/* ---------- Health indicator ---------- */
+.health-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px 5px 9px; border-radius: var(--r-pill);
+  font-size: 12px; font-weight: 620; letter-spacing: -0.01em;
+  background: var(--surface-sunk); color: var(--ink-2); white-space: nowrap;
+}
+.health-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.health-chip.good .health-dot { background: var(--grow); }
+.health-chip.fair .health-dot { background: var(--warn); }
+.health-chip.poor .health-dot { background: var(--alert); }
+.health-chip.good { color: var(--grow); background: var(--grow-bg); }
+.health-chip.fair { color: var(--warn); background: var(--warn-bg); }
+.health-chip.poor { color: var(--alert); background: var(--alert-bg); }
+.plant-card-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+/* Plants whose last check came back low, surfaced on Today */
+.ailing { display: flex; align-items: center; gap: 12px; padding: 11px 0; text-decoration: none; color: inherit; }
+.ailing + .ailing { border-top: 1px solid var(--hairline); }
+.ailing-main { min-width: 0; }
+.ailing-name { font-size: 16px; font-weight: 620; letter-spacing: -0.02em; }
+.ailing-note { font-size: 13px; color: var(--ink-2); letter-spacing: 0; }
+
+/* ---------- Actionable steps ---------- */
+.act-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+/* Text gets the full width; the buttons sit under it. Squeezing an
+   instruction into a column beside two buttons makes it unreadable. */
+.act {
+  display: grid; grid-template-columns: auto 1fr; column-gap: 11px;
+  padding: 13px; margin-bottom: 8px;
+  background: var(--surface); border-radius: var(--r-field);
+}
+.act-icon { font-size: 17px; line-height: 1.35; }
+.act-main { min-width: 0; }
+.act-title { font-size: 15px; font-weight: 600; letter-spacing: -0.015em; line-height: 1.35; }
+.act-detail { font-size: 13px; color: var(--ink-2); margin-top: 2px; letter-spacing: 0; }
+.act-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 7px; }
+.act-when { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-2); }
+.act-plan { font-size: 12.5px; color: var(--cool); letter-spacing: 0; }
+.act-buttons { grid-column: 2; display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.act-buttons .btn { white-space: nowrap; }
+.ai-when { font-size: 12px; color: var(--ink-3); margin-left: auto; }
+
+/* ---------- Calendar setup ---------- */
+.cal-block { padding-top: 16px; }
+.cal-block + .cal-block { margin-top: 6px; border-top: 1px solid var(--hairline); }
+.setup-steps { margin: 0 0 12px 18px; font-size: 13.5px; color: var(--ink-2); line-height: 1.55; letter-spacing: 0; }
+.setup-steps li { margin-bottom: 7px; }
+.setup-steps b { color: var(--ink); font-weight: 600; }
+.origin-code {
+  display: inline-block; margin-top: 5px; padding: 5px 9px;
+  background: var(--surface-sunk); border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink);
+  word-break: break-all;
+}
+
 .search-bar { margin-bottom: 20px; }
 
 /* ---------- Species autocomplete ---------- */
