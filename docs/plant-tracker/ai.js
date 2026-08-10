@@ -185,6 +185,61 @@ ${describeCareHistory(logs) || "(none recorded)"}`,
 }
 
 // ---------------------------------------------------------------------------
+// Species identification from a photo (the first step of adding a plant)
+// ---------------------------------------------------------------------------
+// The enum pins the answer to a species we actually hold care data for, so the
+// result can drive the schedule directly. `common_name` stays free text so a
+// species outside the guide is still named properly rather than forced.
+function identifySchema() {
+  return {
+    type: "object",
+    properties: {
+      is_plant: { type: "boolean", description: "false if the photo doesn't show a plant" },
+      common_name: { type: "string", description: "Best-guess common name, e.g. 'Swiss Cheese Plant'" },
+      latin_name: { type: "string", description: "Botanical name if identifiable, else empty" },
+      species_key: {
+        type: "string",
+        enum: PLANT_GUIDE.map(g => g.key),
+        description: "Closest entry in the care guide; 'other' if none is a reasonable match"
+      },
+      confidence: { type: "string", enum: ["high", "medium", "low"] },
+      alternatives: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            common_name: { type: "string" },
+            species_key: { type: "string", enum: PLANT_GUIDE.map(g => g.key) }
+          },
+          required: ["common_name", "species_key"],
+          additionalProperties: false
+        },
+        description: "Up to 2 other plausible species, most likely first. Empty when confident."
+      },
+      looks_outdoor: { type: "boolean", description: "True if the setting looks like a porch, balcony, or garden" },
+      note: { type: "string", description: "One short sentence on what gave it away, or what's unclear" }
+    },
+    required: ["is_plant", "common_name", "latin_name", "species_key", "confidence", "alternatives", "looks_outdoor", "note"],
+    additionalProperties: false
+  };
+}
+
+async function aiIdentifySpecies(blob) {
+  const result = await askClaude({
+    system: "You identify houseplants and garden plants from photos for a plant-care app. Judge only from what is visible — leaf shape, venation, growth habit, stem, pot, and setting. Match to the provided species list whenever the plant plausibly belongs to one of those entries, since the app has care data for them; use 'other' only when nothing fits. Be honest about confidence: say low and offer alternatives rather than guessing precisely at a species you can't distinguish.",
+    messages: [{
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: await blobToApiImage(blob) } },
+        { type: "text", text: "What plant is this? Identify the species and match it to the care guide." },
+      ],
+    }],
+    schema: identifySchema(),
+  });
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Garden-wide advisor: reasons over every plant's state + care + weather
 // ---------------------------------------------------------------------------
 const GARDEN_SCHEMA = {

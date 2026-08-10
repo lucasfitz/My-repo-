@@ -270,6 +270,40 @@ textarea { min-height: 84px; resize: vertical; }
 .btn.block { width: 100%; }
 .btn:disabled { opacity: .45; cursor: default; }
 
+/* ---------- Photo-first capture (add plant) ---------- */
+.photo-drop { display: block; cursor: pointer; }
+.photo-drop-inner {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+  aspect-ratio: 4/5; border-radius: var(--r-media); background: var(--surface-sunk);
+  border: 1.5px dashed var(--hairline); text-align: center; padding: 24px;
+  transition: border-color .15s var(--ease), background .15s var(--ease);
+  overflow: hidden; position: relative;
+}
+.photo-drop:hover .photo-drop-inner { border-color: var(--ink-3); }
+.photo-drop:active .photo-drop-inner { background: var(--ground); }
+.photo-drop-icon { width: 34px; height: 34px; fill: none; stroke: var(--ink-2); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; margin-bottom: 2px; }
+.photo-drop-title { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); }
+.photo-drop-sub { font-size: 13px; color: var(--ink-2); }
+
+/* Once a photo is chosen the frame becomes the photo itself */
+.photo-drop.has-photo .photo-drop-inner { border: none; padding: 0; background: var(--surface-sunk); }
+.photo-drop.has-photo img { width: 100%; height: 100%; object-fit: cover; }
+.photo-drop-change {
+  position: absolute; right: 12px; bottom: 12px;
+  background: var(--ink); color: var(--ground); border-radius: var(--r-pill);
+  padding: 7px 15px; font-size: 13px; font-weight: 600; box-shadow: var(--lift-2);
+}
+
+.id-status { font-size: 15px; color: var(--ink-2); padding: 14px 2px 2px; }
+.id-card { margin-top: 14px; padding: 16px; border-radius: var(--r-field); background: var(--surface-sunk); }
+.id-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.id-name { font-size: 19px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.2; }
+.id-latin { font-size: 13px; font-style: italic; color: var(--ink-2); }
+.id-note { font-size: 13px; color: var(--ink-2); margin-top: 8px; letter-spacing: 0; }
+.id-alts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.id-alts-label { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-2); }
+.id-alts .pill { padding: 7px 14px; font-size: 13px; }
+
 .search-bar { margin-bottom: 20px; }
 
 /* ---------- Species autocomplete ---------- */
