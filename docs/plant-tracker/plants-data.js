@@ -125,10 +125,10 @@ const PLANT_GUIDE = [
 ];
 
 const SEASONAL_TIPS = {
-  winter: "❄️ Winter mode: most plants rest now. Stretch watering intervals ~50% longer, pause fertilizing, and move plants away from cold windows and heat vents.",
-  spring: "🌷 Spring: growth is restarting. Resume regular fertilizing, repot anything root-bound, and start propagating cuttings.",
-  summer: "☀️ Summer: peak growing season. Plants drink more — check soil a day or two early on hot weeks, and shield delicate leaves from harsh afternoon sun.",
-  autumn: "🍂 Autumn: growth is slowing. Taper off fertilizer, ease up on watering, and give leaves a good dusting before the low-light months."
+  winter: "Winter: most plants rest now. Stretch watering intervals ~50% longer, pause fertilizing, and move plants away from cold windows and heat vents.",
+  spring: "Spring: growth is restarting. Resume regular fertilizing, repot anything root-bound, and start propagating cuttings.",
+  summer: "Summer: peak growing season. Plants drink more — check soil a day or two early on hot weeks, and shield delicate leaves from harsh afternoon sun.",
+  autumn: "Autumn: growth is slowing. Taper off fertilizer, ease up on watering, and give leaves a good dusting before the low-light months."
 };
 
 function currentSeason(d = new Date()) {

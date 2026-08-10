@@ -145,8 +145,8 @@ function weatherAdvisories(wx) {
     out.push({ icon: "🌦️", text: "Decent rain expected in the next couple of days — thirsty-but-not-desperate porch plants can wait for it." });
   }
   const season = currentSeason();
-  if (season === "winter") out.push({ icon: "❄️", text: "Winter: outdoor watering intervals are stretched ~50% and fertilizing can pause until spring." });
-  if (season === "summer") out.push({ icon: "☀️", text: "Summer: outdoor watering intervals are tightened ~20% while growth is at its peak." });
+  if (season === "winter") out.push({ icon: "", text: "Winter: outdoor watering intervals are stretched ~50% and fertilizing can pause until spring." });
+  if (season === "summer") out.push({ icon: "", text: "Summer: outdoor watering intervals are tightened ~20% while growth is at its peak." });
   return out;
 }
 
