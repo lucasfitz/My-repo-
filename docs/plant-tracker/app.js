@@ -440,49 +440,278 @@ async function viewPlants() {
 }
 
 // ----- Add / Edit plant -----
+// A bottom drawer. Opens over whatever you were doing, dismisses by tapping
+// away or pressing Esc — `onDismiss` fires only for those, not for close().
+function openSheet({ title, sub = "", onDismiss = null }) {
+  const el = document.createElement("div");
+  el.className = "sheet-wrap";
+  el.innerHTML = `
+    <div class="sheet-scrim"></div>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+      <div class="sheet-grab" aria-hidden="true"></div>
+      <div class="sheet-head">
+        <h2 id="sheetTitle"></h2>
+        <p class="sheet-sub"></p>
+      </div>
+      <div class="sheet-body"></div>
+      <div class="sheet-foot"></div>
+    </div>`;
+  document.body.appendChild(el);
+  document.body.classList.add("sheet-open");
+  requestAnimationFrame(() => el.classList.add("in"));
+
+  let closed = false;
+  const finish = dismissed => {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener("keydown", onKey);
+    el.classList.remove("in");
+    document.body.classList.remove("sheet-open");
+    setTimeout(() => el.remove(), 260);
+    if (dismissed && onDismiss) onDismiss();
+  };
+  const onKey = e => { if (e.key === "Escape") finish(true); };
+  document.addEventListener("keydown", onKey);
+  el.querySelector(".sheet-scrim").addEventListener("click", () => finish(true));
+
+  const api = {
+    el,
+    body: el.querySelector(".sheet-body"),
+    foot: el.querySelector(".sheet-foot"),
+    setHead(t, s) {
+      el.querySelector("#sheetTitle").textContent = t;
+      const p = el.querySelector(".sheet-sub");
+      p.textContent = s || "";
+      p.hidden = !s;
+    },
+    close: () => finish(false),
+  };
+  api.setHead(title, sub);
+  return api;
+}
+
+const CONF_LABEL = { high: "Likely", medium: "Maybe", low: "Long shot" };
+const CONF_CLASS = { high: "ok", medium: "fertilize", low: "" };
+
+// ----- Add / edit -----
+// Adding runs in two steps: photograph the plant and confirm what it is, then
+// fill in the details. Editing goes straight to the form.
 async function viewAddEdit(editId = null) {
   const editing = editId ? await dbGet("plants", editId) : null;
+  let photo = null;  // resized blob, saved with the plant on submit
+
+  if (!editing) { renderCapture(); return; }
+  await renderForm();
+
+  // --- Step 1: the photo ---
+  function renderCapture() {
+    $view().innerHTML = `
+      <h1>Add a plant</h1>
+      <p class="subtitle">${aiConfigured()
+        ? "Start with a photo. Sprout will work out what it is — you confirm."
+        : "Start with a photo, then pick the species yourself."}</p>
+      <label class="photo-drop" id="photoDrop">
+        <input type="file" id="pPhoto" accept="image/*" hidden>
+        <div class="photo-drop-inner" id="photoDropInner">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="photo-drop-icon">
+            <rect x="3" y="6" width="18" height="14" rx="3"/><circle cx="12" cy="13" r="3.4"/><path d="M8.5 6l1.4-2.2h4.2L15.5 6"/>
+          </svg>
+          <span class="photo-drop-title">Take a photo</span>
+          <span class="photo-drop-sub">Or choose one from your library</span>
+        </div>
+      </label>
+      <button class="btn block secondary" id="skipPhoto" style="margin-top:14px">Add without a photo</button>`;
+    document.getElementById("pPhoto").addEventListener("change", onPhotoPicked);
+    document.getElementById("skipPhoto").addEventListener("click", () => renderForm());
+  }
+
+  async function onPhotoPicked(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      photo = await resizeImage(file);
+    } catch {
+      toast("Couldn't read that image — try another");
+      return;
+    }
+    const inner = document.getElementById("photoDropInner");
+    if (inner) {  // still on step 1: show the photo while we think about it
+      document.getElementById("photoDrop").classList.add("has-photo");
+      inner.innerHTML = `<img src="${URL.createObjectURL(photo)}" alt="">`;
+    }
+    if (!aiConfigured()) { await renderForm(); return; }
+    await identify();
+  }
+
+  // --- Step 2: the shortlist, in a drawer ---
+  // `apply` receives what the owner settled on. From step 1 that builds the
+  // form; from inside the form it updates the fields in place, so re-running
+  // identification never costs you what you already typed.
+  async function identify(apply = seed => renderForm(seed)) {
+    const sheet = openSheet({
+      title: "Identifying…",
+      sub: "Reading leaf shape, habit, and setting.",
+      onDismiss: () => apply({}),
+    });
+    sheet.body.innerHTML = `<div class="cand-row"><div class="cand skeleton"></div></div>`.repeat(3);
+
+    let id;
+    try {
+      id = await aiIdentifySpecies(photo);
+    } catch (err) {
+      sheet.close();
+      toast("Couldn't identify it — " + err.message);
+      apply({});
+      return;
+    }
+
+    if (!id.is_plant || !id.candidates.length) {
+      sheet.setHead("That doesn't look like a plant", id.note || "");
+      sheet.body.innerHTML = "";
+      sheet.foot.innerHTML = `<button class="btn block" id="candManual">Add it anyway</button>`;
+      document.getElementById("candManual").addEventListener("click", () => {
+        sheet.close();
+        apply({ outdoor: id.looks_outdoor });
+      });
+      return;
+    }
+    renderCandidates(sheet, id, apply);
+  }
+
+  function renderCandidates(sheet, id, apply) {
+    const cands = id.candidates;
+    const many = cands.length > 1;
+    const count = ["", "one", "two", "three", "four", "five"][cands.length] || cands.length;
+    sheet.setHead(
+      many ? "Which one is it?" : "Is this your plant?",
+      many
+        ? `It could be ${count} things — closest first. Tap one to compare against example photos.`
+        : (id.note || "Tap it to compare against example photos.")
+    );
+
+    sheet.body.innerHTML = cands.map((c, i) => `
+      <div class="cand-row">
+        <button type="button" class="cand" data-i="${i}" aria-pressed="false">
+          <span class="cand-thumb" data-thumb="${i}">${esc(guideEntry(c.species_key).emoji || "🌿")}</span>
+          <span class="cand-main">
+            <span class="cand-name">${esc(c.common_name)}</span>
+            ${c.latin_name ? `<span class="cand-latin">${esc(c.latin_name)}</span>` : ""}
+            ${c.why ? `<span class="cand-why">${esc(c.why)}</span>` : ""}
+          </span>
+          <span class="badge ${CONF_CLASS[c.confidence] || ""} cand-conf">${CONF_LABEL[c.confidence] || ""}</span>
+        </button>
+        <div class="cand-examples" data-ex="${i}" hidden></div>
+      </div>`).join("");
+
+    sheet.foot.innerHTML = `
+      <button class="btn block" id="candUse">Use this</button>
+      <button class="btn block secondary" id="candNone" style="margin-top:8px">None of these — I'll search</button>`;
+
+    const rows = [...sheet.body.querySelectorAll(".cand")];
+    const useBtn = document.getElementById("candUse");
+    let picked = 0;
+
+    const select = i => {
+      picked = i;
+      rows.forEach((r, n) => {
+        r.classList.toggle("picked", n === i);
+        r.setAttribute("aria-pressed", String(n === i));
+        sheet.body.querySelector(`[data-ex="${n}"]`).hidden = n !== i;
+      });
+      useBtn.textContent = `Use ${cands[i].common_name}`;
+      loadExamples(i);
+    };
+
+    // One lookup per candidate, cached: its first image becomes the row's
+    // thumbnail, the rest fill the example strip when that row is selected.
+    const examples = {};
+    async function loadExamples(i) {
+      const c = cands[i];
+      const box = sheet.body.querySelector(`[data-ex="${i}"]`);
+      if (examples[i] === undefined) {
+        box.innerHTML = `<div class="cand-ex-label">Loading example photos…</div>`;
+        try {
+          examples[i] = await speciesExamples(c.latin_name, c.common_name, 3);
+        } catch {
+          examples[i] = [];
+        }
+        if (!sheet.el.isConnected) return;
+        const thumb = sheet.body.querySelector(`[data-thumb="${i}"]`);
+        if (examples[i].length && thumb) {
+          thumb.classList.add("has-img");
+          thumb.innerHTML = `<img src="${esc(examples[i][0])}" alt="" loading="lazy">`;
+        }
+      }
+      box.innerHTML = examples[i].length
+        ? `<div class="cand-ex-label">Example photos of ${esc(c.latin_name || c.common_name)}</div>
+           <div class="cand-ex-strip">${examples[i]
+             .map(u => `<img src="${esc(u)}" alt="Example ${esc(c.common_name)}" loading="lazy">`).join("")}</div>`
+        : `<div class="cand-ex-label">No example photos available — check the name against the guide.</div>`;
+    }
+
+    rows.forEach((r, i) => r.addEventListener("click", () => select(i)));
+    select(0);
+    // Preload the thumbnails of the rest so the list fills in as you read it.
+    cands.forEach((_, i) => { if (i !== picked) loadExamples(i).catch(() => {}); });
+
+    useBtn.addEventListener("click", () => {
+      const c = cands[picked];
+      sheet.close();
+      apply({ key: c.species_key, name: c.common_name, outdoor: id.looks_outdoor });
+    });
+    document.getElementById("candNone").addEventListener("click", () => {
+      sheet.close();
+      apply({ outdoor: id.looks_outdoor });
+    });
+  }
+
+  // --- Step 3: the details ---
+  async function renderForm(seed = {}) {
   const roomSet = new Set(state.settings.rooms || []);
   (await dbAll("plants")).forEach(p => { if (p.location) roomSet.add(p.location); });
   if (editing && editing.location) roomSet.add(editing.location);
   const rooms = [...roomSet].sort((a, b) => a.localeCompare(b));
 
+  const seedGuide = seed.key ? guideEntry(seed.key) : null;
+  const speciesValue = editing ? (editing.species || guideEntry(editing.speciesKey).name) : (seed.name || "");
+  const speciesKeyValue = editing ? editing.speciesKey : (seed.key || "other");
+  const waterValue = editing ? editing.waterEvery : (seedGuide ? seedGuide.waterDays : 7);
+  const fertValue = editing ? editing.fertEvery : (seedGuide ? seedGuide.fertDays : 30);
+
   $view().innerHTML = `
-    <h1>${editing ? "Edit " + esc(editing.name) : "Add a plant"}</h1>
+    <h1>${editing ? "Edit " + esc(editing.name) : "Confirm the details"}</h1>
     <p class="subtitle">${editing
       ? "Update details or schedules."
-      : aiConfigured()
-        ? "Start with a photo — Sprout will identify the species and set up its care."
-        : "Start with a photo, then pick the species."}</p>
+      : seed.name
+        ? `Set up as ${esc(seed.name)}, with care from the guide. Change anything that's off.`
+        : "Give it a name and pick a species — the care schedule follows from there."}</p>
     <form id="plantForm" class="card">
-      ${editing ? "" : `
-      <div class="field">
-        <label for="pPhoto">Photo</label>
-        <label class="photo-drop" id="photoDrop">
-          <input type="file" id="pPhoto" accept="image/*" hidden>
-          <div class="photo-drop-inner" id="photoDropInner">
-            <svg viewBox="0 0 24 24" aria-hidden="true" class="photo-drop-icon">
-              <rect x="3" y="6" width="18" height="14" rx="3"/><circle cx="12" cy="13" r="3.4"/><path d="M8.5 6l1.4-2.2h4.2L15.5 6"/>
-            </svg>
-            <span class="photo-drop-title">Add a photo</span>
-            <span class="photo-drop-sub">Take one or choose from your library</span>
-          </div>
-        </label>
-        <div id="idResult"></div>
+      ${editing || !photo ? "" : `
+      <div class="form-photo">
+        <img src="${URL.createObjectURL(photo)}" alt="Photo of the plant being added">
+        <div class="form-photo-actions">
+          <span class="form-photo-label">Your photo</span>
+          <span class="form-photo-links">
+            <button type="button" class="link-btn" id="changePhoto">Change</button>
+            ${aiConfigured() ? `<button type="button" class="link-btn" id="reIdentify">Identify again</button>` : ""}
+          </span>
+        </div>
+        <input type="file" id="pPhoto" accept="image/*" hidden>
       </div>`}
       <div class="field">
         <label for="pName">Nickname *</label>
-        <input type="text" id="pName" required maxlength="60" placeholder="e.g. Fernie Sanders" value="${esc(editing?.name || "")}">
+        <input type="text" id="pName" required maxlength="60"
+          placeholder="${seed.name ? `e.g. ${esc(seed.name)}` : "e.g. Fernie Sanders"}" value="${esc(editing?.name || "")}">
       </div>
       <div class="field">
         <label for="pSpeciesSearch">Species</label>
         <div class="autocomplete">
           <input type="text" id="pSpeciesSearch" maxlength="80" autocomplete="off" autocapitalize="off"
             placeholder="Search ${PLANT_GUIDE.length - 1}+ species…"
-            value="${esc(editing ? (editing.species || guideEntry(editing.speciesKey).name) : "")}">
+            value="${esc(speciesValue)}">
           <div class="ac-list" id="speciesResults" hidden></div>
         </div>
-        <input type="hidden" id="pSpeciesKey" value="${esc(editing?.speciesKey || "other")}">
+        <input type="hidden" id="pSpeciesKey" value="${esc(speciesKeyValue)}">
         <div class="hint" id="speciesHint"></div>
       </div>
       <div class="field">
@@ -496,7 +725,7 @@ async function viewAddEdit(editId = null) {
       </div>
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="pOutdoor" ${editing && isOutdoorPlant(editing) ? "checked" : ""} style="width:18px;height:18px">
+          <input type="checkbox" id="pOutdoor" ${editing ? (isOutdoorPlant(editing) ? "checked" : "") : (seed.outdoor ? "checked" : "")} style="width:18px;height:18px">
           Lives outdoors (porch, balcony, garden)
         </label>
         <div class="hint">Outdoor plants get season- and weather-aware care: watering flexes with the season, and live weather flags rain, heat, and frost.</div>
@@ -504,12 +733,12 @@ async function viewAddEdit(editId = null) {
       <div class="field-row">
         <div class="field">
           <label for="pWater">Water every (days)</label>
-          <input type="number" id="pWater" min="0" max="365" value="${editing ? editing.waterEvery : 7}">
+          <input type="number" id="pWater" min="0" max="365" value="${waterValue}">
           <div class="hint">0 = no reminders</div>
         </div>
         <div class="field">
           <label for="pFert">Fertilize every (days)</label>
-          <input type="number" id="pFert" min="0" max="365" value="${editing ? editing.fertEvery : 30}">
+          <input type="number" id="pFert" min="0" max="365" value="${fertValue}">
           <div class="hint">0 = no reminders</div>
         </div>
       </div>
@@ -543,7 +772,7 @@ async function viewAddEdit(editId = null) {
       ? `${g.latin} — ${g.light}. Water every ~${g.waterDays}d, fertilize ${g.fertDays ? "every ~" + g.fertDays + "d" : "never"}`
       : "";
   };
-  if (editing) showHint();
+  if (editing || seed.key) showHint();
 
   const pickSpecies = (g) => {
     sKey.value = g.key;
@@ -552,6 +781,18 @@ async function viewAddEdit(editId = null) {
     document.getElementById("pWater").value = g.waterDays;
     document.getElementById("pFert").value = g.fertDays;
     sList.hidden = true;
+    showHint();
+  };
+
+  // Same, but keeping the name the identification used — "Swiss Cheese Plant"
+  // rather than whatever the guide happens to call that key.
+  const applySpeciesKey = (key, displayName) => {
+    const g = guideEntry(key);
+    sKey.value = key;
+    sInput.value = displayName || g.name;
+    confirmedName = sInput.value;
+    document.getElementById("pWater").value = g.waterDays;
+    document.getElementById("pFert").value = g.fertDays;
     showHint();
   };
 
@@ -575,85 +816,29 @@ async function viewAddEdit(editId = null) {
   const roomNew = document.getElementById("pRoomNew");
   const outdoorCb = document.getElementById("pOutdoor");
 
-  // --- Photo first: preview it, then let Claude name the species ---
-  const photoInput = document.getElementById("pPhoto");
-  const nameInput = document.getElementById("pName");
-  let pickedPhoto = null; // resized blob, saved on submit
-
-  const applySpeciesKey = (key, displayName) => {
-    const g = guideEntry(key);
-    sKey.value = key;
-    sInput.value = displayName || g.name;
-    confirmedName = sInput.value;
-    document.getElementById("pWater").value = g.waterDays;
-    document.getElementById("pFert").value = g.fertDays;
-    showHint();
+  // The photo carried over from step 1 — swap it, or run the shortlist again.
+  // Both update the form in place rather than rebuilding it.
+  const applyHere = seed => {
+    if (seed.key) applySpeciesKey(seed.key, seed.name);
+    if (seed.outdoor) outdoorCb.checked = true;
   };
-
+  const changeBtn = document.getElementById("changePhoto");
+  const againBtn = document.getElementById("reIdentify");
+  const photoInput = document.getElementById("pPhoto");
+  if (changeBtn) changeBtn.addEventListener("click", () => photoInput.click());
+  if (againBtn) againBtn.addEventListener("click", () => identify(applyHere));
   if (photoInput) photoInput.addEventListener("change", async e => {
     const file = e.target.files[0];
     if (!file) return;
-    const box = document.getElementById("idResult");
-    const drop = document.getElementById("photoDrop");
     try {
-      pickedPhoto = await resizeImage(file);
+      photo = await resizeImage(file);
     } catch {
-      box.innerHTML = `<p class="hint">Couldn't read that image — try another.</p>`;
+      toast("Couldn't read that image — try another");
       return;
     }
-    // Swap the dropzone for the photo itself
-    drop.classList.add("has-photo");
-    document.getElementById("photoDropInner").innerHTML =
-      `<img src="${URL.createObjectURL(pickedPhoto)}" alt="">
-       <span class="photo-drop-change">Change</span>`;
-
-    if (!aiConfigured()) {
-      box.innerHTML = `<p class="hint">Add an Anthropic API key in Settings and Sprout will identify the species from this photo.</p>`;
-      return;
-    }
-
-    box.innerHTML = `<div class="id-status">Identifying…</div>`;
-    try {
-      const id = await aiIdentifySpecies(pickedPhoto);
-      if (!id.is_plant) {
-        box.innerHTML = `<div class="id-status">That doesn't look like a plant — pick the species yourself below.</div>`;
-        return;
-      }
-      applySpeciesKey(id.species_key, id.common_name);
-      if (id.looks_outdoor) outdoorCb.checked = true;
-      if (!nameInput.value.trim()) nameInput.placeholder = `e.g. ${id.common_name}`;
-
-      const conf = { high: "Confident", medium: "Fairly confident", low: "Best guess" }[id.confidence] || "";
-      box.innerHTML = `
-        <div class="id-card">
-          <div class="id-head">
-            <div>
-              <div class="id-name">${esc(id.common_name)}</div>
-              ${id.latin_name ? `<div class="id-latin">${esc(id.latin_name)}</div>` : ""}
-            </div>
-            <span class="badge ${id.confidence === "high" ? "ok" : id.confidence === "low" ? "" : "fertilize"}">${conf}</span>
-          </div>
-          ${id.note ? `<p class="id-note">${esc(id.note)}</p>` : ""}
-          <p class="id-note">Care schedule set from this. Change it below if it's wrong.</p>
-          ${id.alternatives.length ? `
-            <div class="id-alts">
-              <span class="id-alts-label">Or:</span>
-              ${id.alternatives.map(a =>
-                `<button type="button" class="pill" data-alt-key="${esc(a.species_key)}" data-alt-name="${esc(a.common_name)}">${esc(a.common_name)}</button>`
-              ).join("")}
-            </div>` : ""}
-        </div>`;
-      box.querySelectorAll("[data-alt-key]").forEach(btn => {
-        btn.addEventListener("click", () => {
-          applySpeciesKey(btn.dataset.altKey, btn.dataset.altName);
-          box.querySelectorAll("[data-alt-key]").forEach(b => b.classList.remove("active"));
-          btn.classList.add("active");
-          toast(`Set to ${btn.dataset.altName}`);
-        });
-      });
-    } catch (err) {
-      box.innerHTML = `<p class="hint">Couldn't identify it (${esc(err.message)}). Pick the species below.</p>`;
-    }
+    const img = document.querySelector(".form-photo img");
+    if (img) img.src = URL.createObjectURL(photo);
+    if (aiConfigured()) identify(applyHere);
   });
 
   roomSel.addEventListener("change", () => {
@@ -690,8 +875,8 @@ async function viewAddEdit(editId = null) {
     plant.notes = document.getElementById("pNotes").value.trim();
     await saveRecord("plants", plant);
     if (!editing) {
-      if (pickedPhoto) {
-        await saveRecord("photos", { id: uid(), plantId: plant.id, blob: pickedPhoto, createdAt: new Date().toISOString() });
+      if (photo) {
+        await saveRecord("photos", { id: uid(), plantId: plant.id, blob: photo, createdAt: new Date().toISOString() });
       }
       await saveRecord("logs", { id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: state.settings.activeUser, note: "Added to the collection" });
     }
@@ -700,6 +885,7 @@ async function viewAddEdit(editId = null) {
   });
   const cancel = document.getElementById("cancelEdit");
   if (cancel) cancel.addEventListener("click", () => { location.hash = "#/plant/" + editId; });
+  }
 }
 
 // ----- Plant detail -----

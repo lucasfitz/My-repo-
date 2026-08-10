@@ -169,6 +169,25 @@ On focus: 1.5px `--ink` ring. Placeholder `--ink-3`.
 No card. Big tabular number in Title size over a Micro label in `--ink-2`,
 separated by hairline verticals. Numbers are the hierarchy; boxes aren't needed.
 
+### Bottom drawer
+For a decision that belongs to the screen you are on — choosing between things,
+confirming a suggestion — rather than a place you navigate to.
+- Rises from the bottom over a `rgba(18,17,15,.42)` scrim, 28px top corners,
+  `--surface`, `--lift-2`, capped at 88vh
+- 38×4px grab handle, then a Title-size heading and one line of `--ink-2` subtitle
+- Body scrolls; the footer holds the actions and does not, so the primary
+  action is always in reach of a thumb
+- Footer carries the safe-area inset and a hairline top edge
+- Dismissible by scrim tap or Esc — and dismissing must leave the user
+  somewhere sensible, never back at a dead end
+
+### Choice row
+A tappable row inside a drawer: 58px image thumbnail, name / botanical name /
+one line of reasoning, and a confidence chip. `--surface-sunk` at rest; the
+picked row goes `--surface` with a 1.5px `--ink` border. The selected row
+expands to a horizontally scrolling strip of 108px reference photos, so a
+suggestion can be compared rather than trusted.
+
 ---
 
 ## 6. Layout
