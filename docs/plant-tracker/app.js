@@ -449,8 +449,27 @@ async function viewAddEdit(editId = null) {
 
   $view().innerHTML = `
     <h1>${editing ? "Edit " + esc(editing.name) : "Add a plant"}</h1>
-    <p class="subtitle">${editing ? "Update details or schedules." : "Pick a species and we'll suggest a care schedule."}</p>
+    <p class="subtitle">${editing
+      ? "Update details or schedules."
+      : aiConfigured()
+        ? "Start with a photo — Sprout will identify the species and set up its care."
+        : "Start with a photo, then pick the species."}</p>
     <form id="plantForm" class="card">
+      ${editing ? "" : `
+      <div class="field">
+        <label for="pPhoto">Photo</label>
+        <label class="photo-drop" id="photoDrop">
+          <input type="file" id="pPhoto" accept="image/*" hidden>
+          <div class="photo-drop-inner" id="photoDropInner">
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="photo-drop-icon">
+              <rect x="3" y="6" width="18" height="14" rx="3"/><circle cx="12" cy="13" r="3.4"/><path d="M8.5 6l1.4-2.2h4.2L15.5 6"/>
+            </svg>
+            <span class="photo-drop-title">Add a photo</span>
+            <span class="photo-drop-sub">Take one or choose from your library</span>
+          </div>
+        </label>
+        <div id="idResult"></div>
+      </div>`}
       <div class="field">
         <label for="pName">Nickname *</label>
         <input type="text" id="pName" required maxlength="60" placeholder="e.g. Fernie Sanders" value="${esc(editing?.name || "")}">
@@ -508,11 +527,6 @@ async function viewAddEdit(editId = null) {
         <label for="pNotes">Notes</label>
         <textarea id="pNotes" maxlength="1000" placeholder="Quirks, where it came from, repotting history…">${esc(editing?.notes || "")}</textarea>
       </div>
-      ${editing ? "" : `
-      <div class="field">
-        <label for="pPhoto">Photo</label>
-        <input type="file" id="pPhoto" accept="image/*">
-      </div>`}
       <button class="btn block" type="submit">${editing ? "Save changes" : "Add plant"}</button>
       ${editing ? `<button class="btn block secondary" type="button" id="cancelEdit" style="margin-top:8px">Cancel</button>` : ""}
     </form>`;
@@ -560,6 +574,88 @@ async function viewAddEdit(editId = null) {
   const roomSel = document.getElementById("pRoom");
   const roomNew = document.getElementById("pRoomNew");
   const outdoorCb = document.getElementById("pOutdoor");
+
+  // --- Photo first: preview it, then let Claude name the species ---
+  const photoInput = document.getElementById("pPhoto");
+  const nameInput = document.getElementById("pName");
+  let pickedPhoto = null; // resized blob, saved on submit
+
+  const applySpeciesKey = (key, displayName) => {
+    const g = guideEntry(key);
+    sKey.value = key;
+    sInput.value = displayName || g.name;
+    confirmedName = sInput.value;
+    document.getElementById("pWater").value = g.waterDays;
+    document.getElementById("pFert").value = g.fertDays;
+    showHint();
+  };
+
+  if (photoInput) photoInput.addEventListener("change", async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const box = document.getElementById("idResult");
+    const drop = document.getElementById("photoDrop");
+    try {
+      pickedPhoto = await resizeImage(file);
+    } catch {
+      box.innerHTML = `<p class="hint">Couldn't read that image — try another.</p>`;
+      return;
+    }
+    // Swap the dropzone for the photo itself
+    drop.classList.add("has-photo");
+    document.getElementById("photoDropInner").innerHTML =
+      `<img src="${URL.createObjectURL(pickedPhoto)}" alt="">
+       <span class="photo-drop-change">Change</span>`;
+
+    if (!aiConfigured()) {
+      box.innerHTML = `<p class="hint">Add an Anthropic API key in Settings and Sprout will identify the species from this photo.</p>`;
+      return;
+    }
+
+    box.innerHTML = `<div class="id-status">Identifying…</div>`;
+    try {
+      const id = await aiIdentifySpecies(pickedPhoto);
+      if (!id.is_plant) {
+        box.innerHTML = `<div class="id-status">That doesn't look like a plant — pick the species yourself below.</div>`;
+        return;
+      }
+      applySpeciesKey(id.species_key, id.common_name);
+      if (id.looks_outdoor) outdoorCb.checked = true;
+      if (!nameInput.value.trim()) nameInput.placeholder = `e.g. ${id.common_name}`;
+
+      const conf = { high: "Confident", medium: "Fairly confident", low: "Best guess" }[id.confidence] || "";
+      box.innerHTML = `
+        <div class="id-card">
+          <div class="id-head">
+            <div>
+              <div class="id-name">${esc(id.common_name)}</div>
+              ${id.latin_name ? `<div class="id-latin">${esc(id.latin_name)}</div>` : ""}
+            </div>
+            <span class="badge ${id.confidence === "high" ? "ok" : id.confidence === "low" ? "" : "fertilize"}">${conf}</span>
+          </div>
+          ${id.note ? `<p class="id-note">${esc(id.note)}</p>` : ""}
+          <p class="id-note">Care schedule set from this. Change it below if it's wrong.</p>
+          ${id.alternatives.length ? `
+            <div class="id-alts">
+              <span class="id-alts-label">Or:</span>
+              ${id.alternatives.map(a =>
+                `<button type="button" class="pill" data-alt-key="${esc(a.species_key)}" data-alt-name="${esc(a.common_name)}">${esc(a.common_name)}</button>`
+              ).join("")}
+            </div>` : ""}
+        </div>`;
+      box.querySelectorAll("[data-alt-key]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          applySpeciesKey(btn.dataset.altKey, btn.dataset.altName);
+          box.querySelectorAll("[data-alt-key]").forEach(b => b.classList.remove("active"));
+          btn.classList.add("active");
+          toast(`Set to ${btn.dataset.altName}`);
+        });
+      });
+    } catch (err) {
+      box.innerHTML = `<p class="hint">Couldn't identify it (${esc(err.message)}). Pick the species below.</p>`;
+    }
+  });
+
   roomSel.addEventListener("change", () => {
     roomNew.hidden = roomSel.value !== "__new__";
     if (!roomNew.hidden) roomNew.focus();
@@ -594,8 +690,9 @@ async function viewAddEdit(editId = null) {
     plant.notes = document.getElementById("pNotes").value.trim();
     await saveRecord("plants", plant);
     if (!editing) {
-      const file = document.getElementById("pPhoto").files[0];
-      if (file) await addPhoto(plant.id, file);
+      if (pickedPhoto) {
+        await saveRecord("photos", { id: uid(), plantId: plant.id, blob: pickedPhoto, createdAt: new Date().toISOString() });
+      }
       await saveRecord("logs", { id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: state.settings.activeUser, note: "Added to the collection" });
     }
     toast(editing ? "Saved" : `Added ${plant.name}`);
