@@ -198,6 +198,18 @@ textarea { min-height: 70px; resize: vertical; }
 @media (prefers-color-scheme: dark) { .week-row.today .week-day { color: var(--green-500); } }
 .week-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
 .week-none { color: var(--ink-soft); font-size: .85rem; }
+.week-wx { min-width: 52px; text-align: right; font-size: .78rem; color: var(--ink-soft); font-weight: 600; padding-top: 3px; }
+
+/* Porch weather */
+.wx-card { background: linear-gradient(135deg, var(--green-50), var(--card)); }
+.wx-now { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.wx-temp { font-size: 1.35rem; font-weight: 800; }
+.wx-range { font-size: .85rem; color: var(--ink-soft); font-weight: 600; }
+.wx-loc { font-size: .75rem; color: var(--ink-soft); margin-left: auto; }
+.wx-advice { font-size: .85rem; padding: 5px 0; border-top: 1px solid var(--line); }
+.wx-tag { color: #1e5f9e; font-weight: 700; }
+.wx-tag.hot { color: var(--red); }
+@media (prefers-color-scheme: dark) { .wx-tag { color: #8fc2f0; } }
 
 /* Guide */
 .guide-item { cursor: pointer; }
