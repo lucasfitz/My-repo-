@@ -16,8 +16,15 @@ const SYNC = {
 const SYNC_STORES = ["plants", "logs", "tasks", "photos"];
 const PHOTO_BUCKET = "plant-photos";
 
-const SYNC_SETUP_SQL = `-- Sprout sync setup: paste into Supabase > SQL Editor > Run (once)
-create table if not exists records (
+// Paste into Supabase > SQL Editor > Run. Safe to run more than once.
+//
+// The editor runs this as ONE transaction, so any statement that errors rolls
+// back everything before it. Realtime and storage both touch objects this role
+// may not own (permissions vary by project), so they are isolated in DO blocks
+// that swallow failures — a project without them still syncs, just without live
+// push or photo sharing. The records table must never be the casualty.
+const SYNC_SETUP_SQL = `-- Sprout sync setup — safe to re-run.
+create table if not exists public.records (
   id text primary key,
   household text not null,
   store text not null,
@@ -26,22 +33,45 @@ create table if not exists records (
   updated_at timestamptz not null default now()
 );
 create index if not exists records_household_updated
-  on records (household, updated_at);
-alter table records enable row level security;
-create policy "sprout anon access" on records
-  for all to anon using (true) with check (true);
-alter publication supabase_realtime add table records;
+  on public.records (household, updated_at);
+alter table public.records enable row level security;
 
-insert into storage.buckets (id, name) values ('plant-photos', 'plant-photos')
-  on conflict (id) do nothing;
-create policy "sprout photos select" on storage.objects
-  for select to anon using (bucket_id = 'plant-photos');
-create policy "sprout photos insert" on storage.objects
-  for insert to anon with check (bucket_id = 'plant-photos');
-create policy "sprout photos update" on storage.objects
-  for update to anon using (bucket_id = 'plant-photos');
-create policy "sprout photos delete" on storage.objects
-  for delete to anon using (bucket_id = 'plant-photos');`;
+drop policy if exists "sprout anon access" on public.records;
+create policy "sprout anon access" on public.records
+  for all to anon using (true) with check (true);
+
+grant usage on schema public to anon;
+grant all on public.records to anon;
+
+-- Live push (optional): skipped if this role cannot alter the publication.
+do $$
+begin
+  alter publication supabase_realtime add table public.records;
+exception when others then
+  raise notice 'Realtime not enabled (%). Sync still works, it polls instead.', sqlerrm;
+end $$;
+
+-- Photo sharing (optional): skipped if storage is not reachable from here.
+do $$
+begin
+  insert into storage.buckets (id, name) values ('plant-photos', 'plant-photos')
+    on conflict (id) do nothing;
+exception when others then
+  raise notice 'Could not create the photo bucket (%).', sqlerrm;
+end $$;
+
+do $$
+begin
+  drop policy if exists "sprout photos all" on storage.objects;
+  create policy "sprout photos all" on storage.objects
+    for all to anon
+    using (bucket_id = 'plant-photos')
+    with check (bucket_id = 'plant-photos');
+exception when others then
+  raise notice 'Could not add the photo policy (%).', sqlerrm;
+end $$;
+
+select 'Sprout is ready - go back to the app and tap Connect.' as status;`;
 
 function syncConfigured() {
   const s = state.settings.sync;
@@ -82,11 +112,27 @@ async function acceptPairing(payload) {
   }
 }
 
+// Supabase's raw errors are accurate but opaque to someone following a
+// five-step setup. Translate the ones this setup can actually produce into
+// the next action to take.
+function syncFriendlyError(msg) {
+  const m = String(msg || "");
+  if (/schema cache|relation .*records.* does not exist|public\.records/i.test(m))
+    return "the setup script hasn't run yet. In Supabase open SQL Editor, paste the script from the setup steps above, press Run, then tap Connect again.";
+  if (/Invalid API key|JWT|apikey/i.test(m))
+    return "that key wasn't accepted. Copy the anon public key from Supabase → Settings → API (not the service_role or database password).";
+  if (/Failed to fetch|NetworkError|ENOTFOUND|ERR_NAME/i.test(m))
+    return "couldn't reach that URL. Check the Project URL from Supabase → Settings → API, and that you're online.";
+  if (/permission denied|row-level security|violates/i.test(m))
+    return "the database refused the write. Re-run the setup script — it grants the access Sprout needs.";
+  return m;
+}
+
 function syncStatusText() {
   switch (SYNC.status) {
     case "online": return "🟢 Connected — changes sync live";
     case "connecting": return "🟡 Connecting…";
-    case "error": return "🔴 Sync problem: " + SYNC.statusMsg;
+    case "error": return "🔴 Not connected — " + syncFriendlyError(SYNC.statusMsg);
     default: return "⚪ Sync is off";
   }
 }

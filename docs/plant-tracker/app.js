@@ -103,13 +103,13 @@ function fmtDateTime(iso) {
   return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
     " · " + new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
+// Compact by design — these sit in one-line rows that must not truncate.
 function dueLabel(dueStr) {
   const n = daysBetween(todayStr(), dueStr);
-  if (n < -1) return `${-n} days overdue`;
-  if (n === -1) return "1 day overdue";
+  if (n < 0) return `${-n}d overdue`;
   if (n === 0) return "due today";
   if (n === 1) return "due tomorrow";
-  return `due in ${n} days`;
+  return `due in ${n}d`;
 }
 
 // Due date for an action on a plant. Falls back to createdAt if never done.
@@ -274,19 +274,21 @@ async function viewToday() {
     const verb = t.kind === "water" ? "Water" : "Fertilize";
     let wxTag = "";
     if (t.kind === "water" && isOutdoorPlant(t.plant)) {
-      if (wxFlags.rainToday) wxTag = ` · <span class="wx-tag">🌧️ rain may cover this</span>`;
-      else if (wxFlags.hotToday) wxTag = ` · <span class="wx-tag hot">🔥 hot — don't skip</span>`;
-      else if (wxFlags.rainAhead && t.delta >= 0) wxTag = ` · <span class="wx-tag">🌦️ rain coming</span>`;
+      if (wxFlags.rainToday) wxTag = ` · <span class="wx-tag">rain may cover this</span>`;
+      else if (wxFlags.hotToday) wxTag = ` · <span class="wx-tag hot">hot — don't skip</span>`;
+      else if (wxFlags.rainAhead && t.delta >= 0) wxTag = ` · <span class="wx-tag">rain coming</span>`;
     }
     return `
       <div class="task ${cls}" data-plant="${t.plant.id}" data-kind="${t.kind}">
         <button class="task-check" data-action="complete" aria-label="Mark done">✓</button>
         ${photo ? `<img class="task-thumb" src="${photo}" alt="">` : `<div class="task-thumb" style="display:grid;place-items:center">${plantEmoji(t.plant)}</div>`}
         <div class="task-body">
-          <div class="task-title">${icon} ${verb} ${esc(t.plant.name)}</div>
+          <div class="task-title">${verb} ${esc(t.plant.name)}</div>
           <div class="task-sub">${esc(t.plant.location || "")}${t.plant.location ? " · " : ""}${dueLabel(t.due)}${wxTag}</div>
         </div>
-        <a class="btn small secondary" href="#/plant/${t.plant.id}">View</a>
+        <a class="task-go" href="#/plant/${t.plant.id}" aria-label="Open ${esc(t.plant.name)}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+        </a>
       </div>`;
   };
 
@@ -318,7 +320,7 @@ async function viewToday() {
       const d = new Date(); d.setDate(d.getDate() + i);
       const label = i === 0 ? "Today" : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
       const chips = list.map(t =>
-        `<span class="badge ${t.delta < 0 ? "overdue" : t.kind === "water" ? "water" : "fertilize"}">${t.kind === "water" ? "💧" : "🌾"} ${esc(t.plant.name)}</span>`).join("");
+        `<span class="badge ${t.delta < 0 ? "overdue" : t.kind === "water" ? "water" : "fertilize"}">${esc(t.plant.name)}</span>`).join("");
       const wxLabel = wx ? weekWeatherLabel(wx, i) : "";
       weekRows.push(`<div class="week-row${i === 0 ? " today" : ""}"><div class="week-day">${label}</div><div class="week-chips">${chips || '<span class="week-none">—</span>'}</div>${wxLabel ? `<div class="week-wx">${wxLabel}</div>` : ""}</div>`);
     }
@@ -411,10 +413,10 @@ async function viewPlants() {
     const photo = await latestPhotoURL(p.id);
     const wDue = nextDue(p, "water");
     const wDelta = wDue ? daysBetween(todayStr(), wDue) : null;
-    let chip = `<span class="badge ok">✓ happy</span>`;
-    if (wDelta !== null && wDelta < 0) chip = `<span class="badge overdue">💧 ${-wDelta}d overdue</span>`;
-    else if (wDelta === 0) chip = `<span class="badge water">💧 water today</span>`;
-    else if (wDelta !== null) chip = `<span class="badge ok">💧 in ${wDelta}d</span>`;
+    let chip = `<span class="badge ok">happy</span>`;
+    if (wDelta !== null && wDelta < 0) chip = `<span class="badge overdue">${-wDelta}d overdue</span>`;
+    else if (wDelta === 0) chip = `<span class="badge water">water today</span>`;
+    else if (wDelta !== null) chip = `<span class="badge">water in ${wDelta}d</span>`;
     return `
       <a class="plant-card" href="#/plant/${p.id}" data-name="${esc(p.name.toLowerCase())} ${esc((p.species || "").toLowerCase())}">
         ${photo ? `<img src="${photo}" alt="${esc(p.name)}">` : `<div class="no-photo">${plantEmoji(p)}</div>`}
@@ -614,11 +616,11 @@ async function viewPlant(id) {
 
   const wDue = nextDue(p, "water"), fDue = nextDue(p, "fertilize");
   const badge = (due, cls, icon, label) => {
-    if (!due) return `<span class="badge ok">${icon} off</span>`;
+    if (!due) return `<span class="badge">${label} off</span>`;
     const d = daysBetween(todayStr(), due);
-    if (d < 0) return `<span class="badge overdue">${icon} ${label} ${-d}d overdue</span>`;
-    if (d === 0) return `<span class="badge ${cls}">${icon} ${label} today</span>`;
-    return `<span class="badge ${cls}">${icon} ${label} ${fmtDate(due)}</span>`;
+    if (d < 0) return `<span class="badge overdue">${label} ${-d}d overdue</span>`;
+    if (d === 0) return `<span class="badge ${cls}">${label} today</span>`;
+    return `<span class="badge ${cls}">${label} ${fmtDate(due)}</span>`;
   };
 
   const logIcons = { water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️", note: "📝", ai: "✨" };
@@ -630,9 +632,14 @@ async function viewPlant(id) {
   };
 
   $view().innerHTML = `
-    <div class="hero">${heroURL ? `<img src="${heroURL}" alt="${esc(p.name)}">` : `<div class="no-photo">${g.emoji}</div>`}</div>
+    <div class="hero">
+      ${heroURL ? `<img src="${heroURL}" alt="${esc(p.name)}">` : `<div class="no-photo">${g.emoji}</div>`}
+      <button class="hero-action" id="btnWaterHero" title="Water ${esc(p.name)}" aria-label="Water ${esc(p.name)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2s5.6 5.9 5.6 9.6a5.6 5.6 0 11-11.2 0C6.4 9.1 12 3.2 12 3.2z"/></svg>
+      </button>
+    </div>
     <h1>${esc(p.name)}</h1>
-    <p class="subtitle">${esc(p.species || g.name)}${p.location ? " · 📍 " + esc(p.location) : ""}</p>
+    <p class="subtitle">${esc(p.species || g.name)}${p.location ? " · " + esc(p.location) : ""}</p>
     <div class="pill-row">
       ${badge(wDue, "water", "💧", "water")}
       ${badge(fDue, "fertilize", "🌾", "fertilize")}
@@ -641,7 +648,7 @@ async function viewPlant(id) {
     ${isOutdoorPlant(p) && p.waterEvery && seasonFactor() !== 1 ? `
       <p class="subtitle" style="margin-top:-6px">${currentSeason() === "winter" ? "❄️" : "☀️"} ${currentSeason()} adjusts outdoor watering: every ${p.waterEvery}d → ~${Math.max(1, Math.round(p.waterEvery * seasonFactor()))}d</p>` : ""}
     <div class="action-row">
-      <button class="btn" id="btnWater">Water now</button>
+      <button class="btn secondary" id="btnWater">Water now</button>
       <button class="btn secondary" id="btnFert">Fertilize</button>
     </div>
     <div class="action-row">
@@ -709,6 +716,7 @@ async function viewPlant(id) {
 
   const act = async (type) => { await logAction(id, type); render(); };
   document.getElementById("btnWater").addEventListener("click", () => act("water"));
+  document.getElementById("btnWaterHero").addEventListener("click", () => act("water"));
   document.getElementById("btnFert").addEventListener("click", () => act("fertilize"));
   document.getElementById("btnRepot").addEventListener("click", () => act("repot"));
   document.getElementById("btnPrune").addEventListener("click", () => act("prune"));
