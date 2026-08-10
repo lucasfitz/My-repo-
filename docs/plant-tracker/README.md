@@ -77,29 +77,35 @@ rather than breaking the page.
 
 ## Real-time sync between your two phones
 
-Sync runs through a **free Supabase project that you create and own** — the
-app itself stays a static page with no keys in it. One-time setup:
+**Only one of you does any setup.** Sync runs through a **free Supabase project
+that you create and own** — the app itself stays a static page with no keys in it.
 
-1. One of you creates a free account at [supabase.com](https://supabase.com)
-   and makes a **New project** (any name works).
-2. In the project, open **SQL Editor**, paste the setup script (the app's
-   **Settings → Real-time sync → Copy setup script** button has it), and
-   press **Run**. This creates one `records` table and a `plant-photos`
+**Phone 1 (once, ~5 min):**
+
+1. Open [supabase.com](https://supabase.com), sign up (free, no card), click
+   **New project**. Any name works; save the database password it asks for —
+   you won't need it again. Wait ~2 min for it to provision.
+2. In the left sidebar open **SQL Editor**. In Sprout, go to
+   **Settings → Real-time sync → Copy setup script**, paste it into the editor,
+   and press **Run**. This creates one `records` table and a `plant-photos`
    storage bucket.
-3. In Supabase **Settings → API**, copy the **Project URL** and the
-   **anon / publishable key**.
-4. In Sprout on *each* phone: **Settings → Real-time sync**, paste the URL
-   and key, enter the *same* household code, and hit **Connect**.
+3. In Supabase's sidebar open **Settings → API**. Copy the **Project URL** and
+   the **anon public** key into the two boxes in Sprout, and hit **Connect**.
 
-From then on, waterings, new plants, photos, and checklist items appear on
-the other phone within seconds. Everything still works offline — changes
-queue up locally (an "outbox") and push automatically when you're back
-online; conflicts resolve last-write-wins per record.
+**Phone 2 (one tap):** on phone 1, tap **Pair another phone**. It opens the
+share sheet (or gives you a copyable link) — send it however you like. Opening
+that link on the second phone shows a "Join the garden" screen; tapping it
+connects them. Nothing to type, no codes to keep matching.
+
+From then on, waterings, new plants, photos, and checklist items appear on the
+other phone within seconds. Everything still works offline — changes queue up
+locally (an "outbox") and push automatically when you're back online; conflicts
+resolve last-write-wins per record.
 
 Privacy note: your data lives only on your phones and in *your* Supabase
-project. The URL/key are stored on-device, never in this repository. Anyone
-with your key + household code could read the data, so don't share them —
-for a plant tracker this "household password" model is a sensible tradeoff.
+project. The URL/key are stored on-device, never in this repository. The pairing
+link contains those credentials, so treat it like a house key — send it to your
+partner, not to a group chat.
 
 The manual **Export/Import backup** in Settings still works as an offline
 safety net.
