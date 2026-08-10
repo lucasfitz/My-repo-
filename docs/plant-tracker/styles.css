@@ -177,6 +177,28 @@ textarea { min-height: 70px; resize: vertical; }
 
 .search-bar { margin-bottom: 14px; }
 
+/* Species autocomplete */
+.autocomplete { position: relative; }
+.ac-list {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 40;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  max-height: 264px; overflow-y: auto; box-shadow: var(--shadow);
+}
+.ac-item { padding: 9px 12px; cursor: pointer; font-size: .92rem; border-bottom: 1px solid var(--line); }
+.ac-item:last-child { border-bottom: none; }
+.ac-item:hover, .ac-item:active { background: var(--green-50); }
+.ac-latin { color: var(--ink-soft); font-style: italic; font-size: .78rem; }
+.ac-none { color: var(--ink-soft); cursor: default; }
+
+/* Week-at-a-glance rows */
+.week-row { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.week-row:last-child { border-bottom: none; }
+.week-day { min-width: 62px; font-size: .78rem; font-weight: 700; color: var(--ink-soft); padding-top: 3px; }
+.week-row.today .week-day { color: var(--green-700); }
+@media (prefers-color-scheme: dark) { .week-row.today .week-day { color: var(--green-500); } }
+.week-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+.week-none { color: var(--ink-soft); font-size: .85rem; }
+
 /* Guide */
 .guide-item { cursor: pointer; }
 .guide-name { font-weight: 700; }

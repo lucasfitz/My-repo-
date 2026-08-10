@@ -67,7 +67,7 @@ async function removeRecord(store, id) {
 // ---------------------------------------------------------------------------
 // Settings / household profiles
 // ---------------------------------------------------------------------------
-const state = { settings: { users: ["Lucas", "Partner"], activeUser: "Lucas", lastNotified: "" } };
+const state = { settings: { users: ["Lucas", "Partner"], activeUser: "Lucas", lastNotified: "", rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office"] } };
 
 async function loadSettings() {
   const row = await dbGet("settings", "main");
@@ -217,7 +217,6 @@ async function viewToday() {
   const care = computeCareTasks(plants);
   const overdue = care.filter(t => t.delta < 0);
   const dueToday = care.filter(t => t.delta === 0);
-  const upcoming = care.filter(t => t.delta > 0 && t.delta <= 7);
   const custom = (await dbAll("tasks")).sort((a, b) => a.done - b.done || b.createdAt.localeCompare(a.createdAt));
   const season = currentSeason();
 
@@ -258,7 +257,20 @@ async function viewToday() {
 
   html += await section("🔴 Overdue", overdue, "overdue");
   html += await section("Due today", dueToday, "due-today");
-  html += await section("Coming up this week", upcoming, "");
+
+  // Week-at-a-glance: which plants need water/fertilizer on each of the next 7 days
+  if (plants.some(p => !p.archived)) {
+    const weekRows = [];
+    for (let i = 0; i < 7; i++) {
+      const list = i === 0 ? care.filter(t => t.delta <= 0) : care.filter(t => t.delta === i);
+      const d = new Date(); d.setDate(d.getDate() + i);
+      const label = i === 0 ? "Today" : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+      const chips = list.map(t =>
+        `<span class="badge ${t.delta < 0 ? "overdue" : t.kind === "water" ? "water" : "fertilize"}">${t.kind === "water" ? "💧" : "🌾"} ${esc(t.plant.name)}</span>`).join("");
+      weekRows.push(`<div class="week-row${i === 0 ? " today" : ""}"><div class="week-day">${label}</div><div class="week-chips">${chips || '<span class="week-none">—</span>'}</div></div>`);
+    }
+    html += `<h2>📅 This week</h2><div class="card flat">${weekRows.join("")}</div>`;
+  }
 
   if (!care.length && !plants.length) {
     html += `<div class="empty"><div class="big">🪴</div><p>No plants yet!<br>Tap <b>Add</b> below to plant your first one.</p></div>`;
@@ -360,8 +372,10 @@ async function viewPlants() {
 // ----- Add / Edit plant -----
 async function viewAddEdit(editId = null) {
   const editing = editId ? await dbGet("plants", editId) : null;
-  const speciesOpts = PLANT_GUIDE.map(g =>
-    `<option value="${g.key}" ${editing && editing.speciesKey === g.key ? "selected" : ""}>${g.emoji} ${g.name}</option>`).join("");
+  const roomSet = new Set(state.settings.rooms || []);
+  (await dbAll("plants")).forEach(p => { if (p.location) roomSet.add(p.location); });
+  if (editing && editing.location) roomSet.add(editing.location);
+  const rooms = [...roomSet].sort((a, b) => a.localeCompare(b));
 
   $view().innerHTML = `
     <h1>${editing ? "Edit " + esc(editing.name) : "Add a plant"}</h1>
@@ -372,17 +386,24 @@ async function viewAddEdit(editId = null) {
         <input type="text" id="pName" required maxlength="60" placeholder="e.g. Fernie Sanders" value="${esc(editing?.name || "")}">
       </div>
       <div class="field">
-        <label for="pSpecies">Species</label>
-        <select id="pSpecies">${speciesOpts}</select>
+        <label for="pSpeciesSearch">Species</label>
+        <div class="autocomplete">
+          <input type="text" id="pSpeciesSearch" maxlength="80" autocomplete="off" autocapitalize="off"
+            placeholder="Search ${PLANT_GUIDE.length - 1}+ species…"
+            value="${esc(editing ? (editing.species || guideEntry(editing.speciesKey).name) : "")}">
+          <div class="ac-list" id="speciesResults" hidden></div>
+        </div>
+        <input type="hidden" id="pSpeciesKey" value="${esc(editing?.speciesKey || "other")}">
         <div class="hint" id="speciesHint"></div>
       </div>
       <div class="field">
-        <label for="pCustomSpecies">Species name (optional, free text)</label>
-        <input type="text" id="pCustomSpecies" maxlength="80" placeholder="e.g. Variegated monstera" value="${esc(editing?.species || "")}">
-      </div>
-      <div class="field">
-        <label for="pLocation">Location in the house</label>
-        <input type="text" id="pLocation" maxlength="60" placeholder="e.g. Living room window" value="${esc(editing?.location || "")}">
+        <label for="pRoom">Room</label>
+        <select id="pRoom">
+          <option value="">— no room —</option>
+          ${rooms.map(r => `<option value="${esc(r)}" ${editing && editing.location === r ? "selected" : ""}>${esc(r)}</option>`).join("")}
+          <option value="__new__">➕ Add a new room…</option>
+        </select>
+        <input type="text" id="pRoomNew" maxlength="40" placeholder="New room name (e.g. Sunroom)" style="margin-top:8px" hidden>
       </div>
       <div class="field-row">
         <div class="field">
@@ -419,26 +440,70 @@ async function viewAddEdit(editId = null) {
       ${editing ? `<button class="btn block secondary" type="button" id="cancelEdit" style="margin-top:8px">Cancel</button>` : ""}
     </form>`;
 
-  const speciesSel = document.getElementById("pSpecies");
+  const sInput = document.getElementById("pSpeciesSearch");
+  const sKey = document.getElementById("pSpeciesKey");
+  const sList = document.getElementById("speciesResults");
   const hint = document.getElementById("speciesHint");
-  const applySpecies = (setDefaults) => {
-    const g = guideEntry(speciesSel.value);
-    hint.textContent = g.latin ? `${g.latin} — suggested: water every ${g.waterDays}d, fertilize every ${g.fertDays}d` : "";
-    if (setDefaults) {
-      document.getElementById("pWater").value = g.waterDays;
-      document.getElementById("pFert").value = g.fertDays;
-    }
+  let confirmedName = sInput.value; // species text currently bound to sKey
+
+  const showHint = () => {
+    const g = guideEntry(sKey.value);
+    hint.textContent = g.latin
+      ? `${g.latin} — ${g.light}. Water every ~${g.waterDays}d, fertilize ${g.fertDays ? "every ~" + g.fertDays + "d" : "never"}`
+      : "";
   };
-  applySpecies(false);
-  speciesSel.addEventListener("change", () => applySpecies(!editing));
+  if (editing) showHint();
+
+  const pickSpecies = (g) => {
+    sKey.value = g.key;
+    sInput.value = g.name;
+    confirmedName = g.name;
+    document.getElementById("pWater").value = g.waterDays;
+    document.getElementById("pFert").value = g.fertDays;
+    sList.hidden = true;
+    showHint();
+  };
+
+  sInput.addEventListener("input", () => {
+    const q = sInput.value.trim().toLowerCase();
+    if (!q) { sList.hidden = true; hint.textContent = ""; return; }
+    const hits = PLANT_GUIDE.filter(g => g.key !== "other" &&
+      (g.name.toLowerCase().includes(q) || g.latin.toLowerCase().includes(q))).slice(0, 12);
+    sList.innerHTML = hits.length
+      ? hits.map(g => `<div class="ac-item" data-key="${g.key}">${g.emoji} ${esc(g.name)} <span class="ac-latin">${esc(g.latin)}</span></div>`).join("")
+      : `<div class="ac-item ac-none">No match — it'll be saved as a custom species with default care</div>`;
+    sList.hidden = false;
+  });
+  sList.addEventListener("mousedown", e => {
+    const item = e.target.closest(".ac-item");
+    if (item && item.dataset.key) { e.preventDefault(); pickSpecies(guideEntry(item.dataset.key)); }
+  });
+  sInput.addEventListener("blur", () => setTimeout(() => { sList.hidden = true; }, 200));
+
+  const roomSel = document.getElementById("pRoom");
+  const roomNew = document.getElementById("pRoomNew");
+  roomSel.addEventListener("change", () => {
+    roomNew.hidden = roomSel.value !== "__new__";
+    if (!roomNew.hidden) roomNew.focus();
+  });
 
   document.getElementById("plantForm").addEventListener("submit", async e => {
     e.preventDefault();
     const plant = editing || { id: uid(), createdAt: new Date().toISOString(), archived: false };
     plant.name = document.getElementById("pName").value.trim();
-    plant.speciesKey = speciesSel.value;
-    plant.species = document.getElementById("pCustomSpecies").value.trim() || guideEntry(speciesSel.value).name;
-    plant.location = document.getElementById("pLocation").value.trim();
+    const typed = sInput.value.trim();
+    const exact = PLANT_GUIDE.find(g => g.name.toLowerCase() === typed.toLowerCase());
+    if (typed && typed === confirmedName.trim()) { /* keep sKey as-is */ }
+    else if (exact) sKey.value = exact.key;
+    else sKey.value = "other";
+    plant.speciesKey = sKey.value;
+    plant.species = typed || guideEntry(sKey.value).name;
+    const newRoom = roomSel.value === "__new__" ? roomNew.value.trim() : "";
+    plant.location = newRoom || (roomSel.value === "__new__" ? "" : roomSel.value);
+    if (plant.location && !(state.settings.rooms || []).includes(plant.location)) {
+      state.settings.rooms = [...(state.settings.rooms || []), plant.location];
+      await saveSettings();
+    }
     plant.waterEvery = parseInt(document.getElementById("pWater").value, 10) || 0;
     plant.fertEvery = parseInt(document.getElementById("pFert").value, 10) || 0;
     plant.lastWatered = document.getElementById("pLastWater").value || null;
@@ -579,7 +644,7 @@ async function viewGuide() {
   const season = currentSeason();
   $view().innerHTML = `
     <h1>Care guide</h1>
-    <p class="subtitle">Suggested schedules & tips for common houseplants.</p>
+    <p class="subtitle">Suggested schedules & tips for ${PLANT_GUIDE.length - 1} common houseplants.</p>
     <div class="tip-card">${SEASONAL_TIPS[season]}</div>
     <div class="search-bar"><input type="text" id="guideSearch" placeholder="Search species…"></div>
     ${PLANT_GUIDE.filter(g => g.key !== "other").map(g => `
