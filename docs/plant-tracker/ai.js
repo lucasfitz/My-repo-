@@ -6,6 +6,9 @@
 
 const AI_MODEL = "claude-opus-5";
 const AI_API_URL = "https://api.anthropic.com/v1/messages";
+// Ceiling for a non-streaming request: past this the call risks the API's own
+// timeout for a single response, which is a worse failure than a short answer.
+const MAX_OUTPUT_TOKENS = 16000;
 
 function aiConfigured() {
   return !!(state.settings.ai && state.settings.ai.key);
@@ -14,7 +17,7 @@ function aiConfigured() {
 // ---------------------------------------------------------------------------
 // Core API call: structured output, refusal handling, server-side fallbacks
 // ---------------------------------------------------------------------------
-async function askClaude({ system, messages, schema, maxTokens = 8000, effort = "high" }) {
+async function askClaude({ system, messages, schema, maxTokens = 8000, effort = "high", _retried = false }) {
   const res = await fetch(AI_API_URL, {
     method: "POST",
     headers: {
@@ -41,6 +44,9 @@ async function askClaude({ system, messages, schema, maxTokens = 8000, effort = 
     } catch { /* non-JSON error body */ }
     if (res.status === 401) msg = "Invalid API key — check it in Settings.";
     if (res.status === 429) msg = "Rate limited — try again in a minute.";
+    // Surface the raw failure for anyone debugging from a phone's console;
+    // the thrown message is written for the person, not the developer.
+    console.warn("Sprout AI request failed:", res.status, msg);
     throw new Error(msg);
   }
   const data = await res.json();
@@ -48,9 +54,21 @@ async function askClaude({ system, messages, schema, maxTokens = 8000, effort = 
     throw new Error("The AI declined this request. Try a different photo.");
   }
   // This model thinks by default, and max_tokens caps thinking and answer
-  // together — so a tight budget truncates the JSON rather than erroring.
+  // together — so a tight budget spends the whole allowance on reasoning and
+  // truncates the JSON rather than erroring. Vision work on a detailed schema
+  // is exactly where that bites, so buy more room and think less hard, once,
+  // instead of handing back a dead end.
   if (data.stop_reason === "max_tokens") {
-    throw new Error("The answer got cut off. Try again.");
+    if (_retried || maxTokens >= MAX_OUTPUT_TOKENS) {
+      throw new Error("The answer got cut off, even with a longer budget. Try again with fewer photos.");
+    }
+    console.warn("Sprout AI: response truncated at", maxTokens, "tokens — retrying with more room");
+    return askClaude({
+      system, messages, schema,
+      maxTokens: Math.min(MAX_OUTPUT_TOKENS, maxTokens * 2),
+      effort: effort === "high" ? "medium" : "low",
+      _retried: true,
+    });
   }
   const textBlock = (data.content || []).find(b => b.type === "text");
   if (!textBlock) throw new Error("Empty response from the AI.");
@@ -173,23 +191,36 @@ const HEALTH_SCHEMA = {
 async function aiAssessPlant(plantId) {
   const plant = await dbGet("plants", plantId);
   const g = guideEntry(plant.speciesKey);
-  const photos = (await dbAllByIndex("photos", "plantId", plantId))
+  const all = await dbAllByIndex("photos", "plantId", plantId);
+  const photos = all
     .filter(p => p.blob)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, 3); // newest first; oldest of the three gives the comparison baseline
-  if (!photos.length) throw new Error("Add at least one photo first — the AI reads the plant's health from its photos.");
+  if (!photos.length) {
+    // A photo record with no blob means the image itself never came down from
+    // storage — a different problem from having taken no photos, and telling
+    // someone to "add a photo" when the gallery is full is just confusing.
+    throw new Error(all.length
+      ? "This plant's photos haven't finished syncing to this device yet. Try again in a moment."
+      : "Add at least one photo first — the AI reads the plant's health from its photos.");
+  }
   const logs = await dbAllByIndex("logs", "plantId", plantId);
   const env = await describeEnvironment(plant);
 
   const content = [];
   // Oldest → newest so "the last photo is current state" reads naturally
+  let decoded = 0;
   for (const ph of [...photos].reverse()) {
+    let data;
+    // One unreadable photo (an odd format, a truncated download) shouldn't
+    // sink the whole check when the others are fine.
+    try { data = await blobToApiImage(ph.blob); }
+    catch { continue; }
     content.push({ type: "text", text: `Photo taken ${ph.createdAt.slice(0, 10)}:` });
-    content.push({
-      type: "image",
-      source: { type: "base64", media_type: "image/jpeg", data: await blobToApiImage(ph.blob) },
-    });
+    content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data } });
+    decoded++;
   }
+  if (!decoded) throw new Error("Couldn't read this plant's photos. Try adding a new one.");
   content.push({
     type: "text",
     text: `Assess this plant's health. The most recent photo shows its current state; earlier photos are for judging the trend.
@@ -208,7 +239,19 @@ ${describeCareHistory(logs) || "(none recorded)"}`,
     system: "You are Sprout's plant doctor: an experienced horticulturist assessing houseplants and garden plants for home gardeners. Ground every observation in what is actually visible in the photos and the care records provided. Be specific and practical — name the likely cause and the concrete fix, not generic advice. If the photos are too unclear to judge something, say so rather than guessing.",
     messages: [{ role: "user", content }],
     schema: HEALTH_SCHEMA,
+    // Reading three photos against a detailed schema is the most expensive
+    // thing the app asks for: high effort spent the entire default budget on
+    // reasoning and truncated the answer every time.
+    effort: "medium",
+    maxTokens: 12000,
   });
+
+  // Nothing gets persisted until it's the shape the views expect. The schema
+  // makes a malformed answer unlikely, but this check now runs unattended, and
+  // a bad object saved to the plant would break its page on every later visit.
+  if (typeof result.health_score !== "number" || typeof result.status !== "string") {
+    throw new Error("The AI sent back an incomplete assessment. Try again.");
+  }
 
   const at = new Date().toISOString();
   // Persist as a care-history entry so health tracks over time (and syncs)
@@ -226,6 +269,46 @@ ${describeCareHistory(logs) || "(none recorded)"}`,
   };
   await saveRecord("plants", plant);
   return plant.health;
+}
+
+/* Every new photo is a fresh look at the plant, so it triggers a check on its
+   own — the whole point of the health score is that it tracks the plant over
+   time, and that only happens if it updates without being asked.
+
+   Runs detached: adding a photo must never wait on the network, and a failed
+   check is not worth interrupting anyone over — the manual button is still
+   there. `ASSESSING` both de-duplicates overlapping runs (bulk adds fire one
+   per plant) and lets the detail view show that one is already in flight. */
+const ASSESSING = new Set();
+
+function assessInFlight(plantId) { return ASSESSING.has(plantId); }
+
+// The manual button goes through the same bookkeeping, so a re-render while a
+// check is running (a sync landing, say) doesn't reset the button to idle.
+async function assessNow(plantId) {
+  ASSESSING.add(plantId);
+  try { return await aiAssessPlant(plantId); }
+  finally { ASSESSING.delete(plantId); }
+}
+
+function autoAssess(plantId) {
+  if (!aiConfigured() || ASSESSING.has(plantId)) return;
+  ASSESSING.add(plantId);
+  (async () => {
+    try {
+      const health = await aiAssessPlant(plantId);
+      // Only speak up if the plant needs something; a clean bill of health
+      // arriving unprompted is noise.
+      if (health.score <= 5) toast(`Health check: ${health.status} — see the steps`);
+    } catch (err) {
+      console.warn("Sprout AI: automatic health check failed —", err.message);
+    } finally {
+      ASSESSING.delete(plantId);
+      // Refresh whatever is on screen: the score belongs on the card and the
+      // pill row, not only on the detail page that started the check.
+      if (typeof render === "function") render();
+    }
+  })();
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +466,8 @@ function actionTaskId(plantId, at, i) {
 }
 
 function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
+  if (!a || typeof a.score !== "number") return "";
+  const status = a.status || "unknown";
   const trendIcon = { improving: "↗", stable: "→", declining: "↘", unknown: "" }[a.trend] || "";
   const actions = a.actions || [];
   const steps = actions.map((act, i) => {
@@ -415,7 +500,7 @@ function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
     <div class="ai-result">
       <div class="ai-head">
         ${aiScoreBadge(a.score)}
-        <b>${esc(a.status[0].toUpperCase() + a.status.slice(1))}</b>
+        <b>${esc(status[0].toUpperCase() + status.slice(1))}</b>
         ${a.trend !== "unknown" ? `<span class="ai-trend">${trendIcon} ${esc(a.trend)}</span>` : ""}
         ${a.at ? `<span class="ai-when">${fmtDate(a.at.slice(0, 10))}</span>` : ""}
       </div>
