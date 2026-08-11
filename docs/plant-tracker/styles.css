@@ -609,6 +609,35 @@ body.sheet-open { overflow: hidden; }
 .ai-head b { font-size: 19px; font-weight: 700; letter-spacing: -0.025em; }
 .ai-trend { font-size: 13px; color: var(--ink-2); font-weight: 500; }
 .ai-summary { font-size: 16px; letter-spacing: -0.01em; margin-bottom: 12px; }
+/* ---------- Collapsible health report ---------- */
+.ai-fold { margin-top: 10px; border-top: 1px solid var(--hairline); }
+.ai-fold-head {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 12px 0 10px; list-style: none; -webkit-tap-highlight-color: transparent;
+}
+/* Safari draws its own triangle unless both of these are cleared. */
+.ai-fold-head::-webkit-details-marker { display: none; }
+.ai-fold-head::marker { content: ""; }
+.ai-fold-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--ink-2); font-weight: 600;
+}
+/* The count is what makes a shut section informative — you can tell whether
+   there is anything in it without opening it. */
+.ai-fold-count {
+  min-width: 19px; height: 19px; padding: 0 6px; border-radius: var(--r-pill);
+  background: var(--surface-sunk); color: var(--ink-2);
+  font-size: 11px; font-weight: 700; display: grid; place-items: center;
+}
+.ai-fold-chev { margin-left: auto; display: grid; place-items: center; color: var(--ink-3); }
+.ai-fold-chev svg {
+  width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+  transition: transform .2s var(--ease);
+}
+.ai-fold[open] .ai-fold-chev svg { transform: rotate(180deg); }
+.ai-fold-body { padding-bottom: 12px; }
+
 .ai-section { margin-top: 18px; }
 .ai-section > b { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); margin-bottom: 7px; font-weight: 600; }
 .ai-item { padding: 5px 0; font-size: 15px; letter-spacing: -0.01em; }

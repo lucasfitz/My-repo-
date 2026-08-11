@@ -571,6 +571,8 @@ function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
   const status = a.status || "unknown";
   const trendIcon = { improving: "↗", stable: "→", declining: "↘", unknown: "" }[a.trend] || "";
   const actions = a.actions || [];
+  const issues = a.issues || [];
+  const observations = a.observations || [];
   const steps = actions.map((act, i) => {
     const taskId = actionTaskId(plantId, a.at || "", i);
     const added = addedIds.includes(taskId);
@@ -606,18 +608,45 @@ function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
         ${a.at ? `<span class="ai-when">${fmtDate(a.at.slice(0, 10))}</span>` : ""}
       </div>
       <p class="ai-summary">${esc(a.summary)}</p>
-      ${(a.observations || []).length ? `<div class="ai-section"><b>Observed</b>${a.observations.map(o => `<div class="ai-item">· ${esc(o)}</div>`).join("")}</div>` : ""}
-      ${(a.issues || []).length ? `<div class="ai-section"><b>Issues</b>${a.issues.map(i =>
-        `<div class="ai-item ai-issue-${i.severity}">· <b>${esc(i.issue)}</b> — ${esc(i.action)}</div>`).join("")}</div>` : ""}
-      ${steps ? `
-        <div class="ai-section">
-          <div class="act-head">
-            <b>What to do</b>
-            <button class="btn small secondary" type="button" id="addAllSteps">Add all to checklist</button>
-          </div>
-          ${steps}
-        </div>` : ""}
+      ${section("What to do", steps, {
+        open: true,
+        count: actions.length,
+        extra: `<button class="btn small secondary" type="button" id="addAllSteps">Add all to checklist</button>`,
+      })}
+      ${section("Issues", issues.map(i =>
+        `<div class="ai-item ai-issue-${esc(i.severity)}">· <b>${esc(i.issue)}</b> — ${esc(i.action)}</div>`).join(""),
+        { open: issues.some(i => i.severity === "high"), count: issues.length })}
+      ${section("Observed", observations.map(o => `<div class="ai-item">· ${esc(o)}</div>`).join(""),
+        { count: observations.length })}
     </div>`;
+}
+
+/* One collapsible block of the health report.
+
+   The report had grown to a wall of text under a photo — a score, a summary,
+   observations, issues and steps all expanded at once, so the thing you can
+   act on was somewhere in the middle of it. Each part now folds, with the
+   count on the header so a collapsed section still tells you whether it is
+   worth opening.
+
+   What to do is open by default because it is the point; issues open only when
+   something is serious; observations are supporting evidence and start shut.
+
+   <details> rather than a click handler: it keeps the disclosure semantics,
+   works before any JS runs, and survives the re-render after a step is added. */
+function section(title, body, { open = false, count = 0, extra = "" } = {}) {
+  if (!body) return "";
+  return `
+    <details class="ai-fold"${open ? " open" : ""}>
+      <summary class="ai-fold-head">
+        <span class="ai-fold-title">${esc(title)}</span>
+        ${count ? `<span class="ai-fold-count">${count}</span>` : ""}
+        <span class="ai-fold-chev" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></svg>
+        </span>
+      </summary>
+      <div class="ai-fold-body">${extra ? `<div class="act-head">${extra}</div>` : ""}${body}</div>
+    </details>`;
 }
 
 function renderGardenInsights(g) {

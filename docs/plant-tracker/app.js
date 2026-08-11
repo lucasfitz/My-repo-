@@ -99,6 +99,16 @@ async function migrateSettings() {
     await renameInHistory(RENAMES);
   }
   await migrateFeedingSchedules();
+
+  // One-time: bring plants that were on sub-rhythm schedules onto the twice-
+  // weekly rhythm. Flagged so it never fights a later manual edit — changing
+  // watering days afterwards re-applies it from Settings, on request.
+  if (!state.settings.waterRhythmApplied) {
+    const moved = await applyWaterRhythm();
+    state.settings.waterRhythmApplied = true;
+    await saveSettings();
+    if (moved.length) console.info("Sprout: moved onto the watering rhythm —", moved);
+  }
 }
 
 /* A plant copies its schedule out of the guide when it's added, so correcting
@@ -228,6 +238,29 @@ function snapToWaterDay(dateStr, every) {
     d.setDate(d.getDate() - 1);
   }
   return d.toISOString().slice(0, 10);
+}
+
+/* Raise anything that wants water more often than the rhythm can give it.
+
+   Snapping alone can't help a plant on a 2-day schedule: it needs attention
+   between watering days, so it stays off the rhythm and keeps putting itself
+   on the list mid-week. Moving it up to the rhythm's longest gap is what
+   actually makes twice a week the whole story.
+
+   Only ever raises — a cactus on 90 days is left alone. Outdoor plants are
+   included, but the seasonal adjustment still shortens their interval in
+   summer, so a hot-weather pot can drift back off the rhythm on its own. */
+async function applyWaterRhythm() {
+  const floor = maxWaterGap(waterDays());
+  if (!Number.isFinite(floor)) return [];
+  const changed = [];
+  for (const p of await dbAll("plants")) {
+    if (p.archived || !p.waterEvery || p.waterEvery >= floor) continue;
+    changed.push({ name: p.name, from: p.waterEvery, to: floor });
+    p.waterEvery = floor;
+    await saveRecord("plants", p);
+  }
+  return changed;
 }
 
 function isWateringDay(dateStr = todayStr()) {
@@ -1964,7 +1997,9 @@ async function viewSettings() {
       <div class="pill-row" id="waterDayPills">
         ${DAY_NAMES.map((d, i) => `<button class="pill ${waterDays().includes(i) ? "active" : ""}" data-day="${i}">${d}</button>`).join("")}
       </div>
-      <p class="subtitle" id="waterDayHint" style="margin-bottom:0"></p>
+      <p class="subtitle" id="waterDayHint"></p>
+      <button class="btn secondary" id="applyRhythm">Move every plant onto this rhythm</button>
+      <p class="subtitle" id="rhythmResult" style="margin-bottom:0"></p>
     </div>
 
     <div class="card">
@@ -2356,6 +2391,17 @@ async function viewSettings() {
       + `Plants that need water more often than that (outdoor pots in summer, mostly) keep their own schedule.`;
   };
   showDayHint();
+  document.getElementById("applyRhythm").addEventListener("click", async e => {
+    const btn = e.target, out = document.getElementById("rhythmResult");
+    btn.disabled = true;
+    const moved = await applyWaterRhythm();
+    btn.disabled = false;
+    out.textContent = moved.length
+      ? `Moved ${moved.length} plant${moved.length === 1 ? "" : "s"} up to every ${moved[0].to} days: `
+        + moved.map(m => `${m.name} (was ${m.from}d)`).join(", ")
+      : "Every plant already fits — nothing needed changing.";
+    if (moved.length) toast(`${moved.length} plant${moved.length === 1 ? "" : "s"} moved onto the rhythm`);
+  });
   document.querySelectorAll("#waterDayPills .pill").forEach(pill => {
     pill.addEventListener("click", async () => {
       const day = Number(pill.dataset.day);
