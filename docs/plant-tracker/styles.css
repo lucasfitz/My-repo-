@@ -428,6 +428,31 @@ body.sheet-open { overflow: hidden; }
   word-break: break-all;
 }
 
+.join-box {
+  padding: 16px; border-radius: var(--r-field);
+  background: var(--surface-sunk); border: 1.5px solid var(--hairline);
+}
+.join-box b { font-size: 15px; letter-spacing: -0.01em; }
+
+.plant-group { margin-bottom: 26px; }
+.group-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 12px 2px; }
+.group-head h2 { font-size: 19px; font-weight: 680; letter-spacing: -0.03em; margin: 0; }
+.group-count {
+  font-size: 12px; font-weight: 620; color: var(--ink-2);
+  background: var(--surface-sunk); border-radius: var(--r-pill); padding: 2px 9px;
+}
+
+.pot-mate { display: flex; align-items: center; gap: 12px; padding: 9px 0; }
+.pot-mate + .pot-mate { border-top: 1px solid var(--hairline); }
+.pot-mate-emoji { font-size: 22px; width: 30px; text-align: center; }
+.pot-mate-name { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.pot-mate-need { font-size: 12.5px; color: var(--ink-2); letter-spacing: 0; }
+
+.batch-bar { display: flex; align-items: center; gap: 12px; margin: -6px 0 16px; }
+.batch-bar span { font-size: 12px; font-weight: 620; letter-spacing: .02em; color: var(--ink-2); white-space: nowrap; }
+.batch-track { flex: 1; height: 4px; border-radius: 999px; background: var(--surface-sunk); overflow: hidden; }
+.batch-track i { display: block; height: 100%; background: var(--ink); border-radius: 999px; transition: width .3s var(--ease); }
+
 .search-bar { margin-bottom: 20px; }
 
 /* ---------- Species autocomplete ---------- */
