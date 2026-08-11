@@ -331,6 +331,28 @@ body.sheet-open { overflow: hidden; }
 .sheet-head { padding: 10px 22px 14px; flex: none; }
 .sheet-head h2 { font-size: 24px; font-weight: 700; letter-spacing: -0.035em; line-height: 1.15; }
 .sheet-sub { font-size: 14px; color: var(--ink-2); margin-top: 5px; letter-spacing: 0; }
+/* The photo the drawer is about. Outside .sheet-body so it holds its place
+   while the options scroll under it. */
+.sheet-subject { flex: none; padding: 0 16px 12px; }
+.subject-shot {
+  display: block; position: relative; width: 100%; padding: 0; border: 0;
+  border-radius: var(--r-media); overflow: hidden; cursor: pointer;
+  background: var(--surface-sunk); -webkit-tap-highlight-color: transparent;
+}
+.subject-shot img {
+  display: block; width: 100%; height: 132px; object-fit: cover;
+  transition: height .22s var(--ease);
+}
+/* Tapped: the whole frame, uncropped — the giveaway detail is often at the
+   edge of the shot, which is exactly what a cover crop throws away. */
+.subject-shot.full img { height: auto; max-height: 46vh; object-fit: contain; }
+.subject-tag {
+  position: absolute; left: 10px; bottom: 10px;
+  padding: 3px 10px; border-radius: var(--r-pill);
+  background: rgba(18, 17, 15, .62); color: #fff;
+  font-size: 12px; font-weight: 600; letter-spacing: 0;
+  backdrop-filter: blur(6px);
+}
 .sheet-body { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 16px 4px; flex: 1 1 auto; }
 .sheet-foot {
   padding: 14px 22px calc(18px + env(safe-area-inset-bottom));

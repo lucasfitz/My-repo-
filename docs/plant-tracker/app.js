@@ -673,6 +673,7 @@ function openSheet({ title, sub = "", onDismiss = null }) {
         <h2 id="sheetTitle"></h2>
         <p class="sheet-sub"></p>
       </div>
+      <div class="sheet-subject" hidden></div>
       <div class="sheet-body"></div>
       <div class="sheet-foot"></div>
     </div>`;
@@ -681,13 +682,19 @@ function openSheet({ title, sub = "", onDismiss = null }) {
   requestAnimationFrame(() => el.classList.add("in"));
 
   let closed = false;
+  // Run after the exit animation, not before it — releasing an object URL
+  // while the sheet is still sliding out blanks the image on the way down.
+  const cleanups = [];
   const finish = dismissed => {
     if (closed) return;
     closed = true;
     document.removeEventListener("keydown", onKey);
     el.classList.remove("in");
     document.body.classList.remove("sheet-open");
-    setTimeout(() => el.remove(), 260);
+    setTimeout(() => {
+      el.remove();
+      cleanups.forEach(fn => { try { fn(); } catch { /* nothing to salvage */ } });
+    }, 260);
     if (dismissed && onDismiss) onDismiss();
   };
   const onKey = e => { if (e.key === "Escape") finish(true); };
@@ -698,6 +705,10 @@ function openSheet({ title, sub = "", onDismiss = null }) {
     el,
     body: el.querySelector(".sheet-body"),
     foot: el.querySelector(".sheet-foot"),
+    // Sits between the heading and the scrolling body, so whatever the drawer
+    // is *about* stays on screen while you scroll the options.
+    subject: el.querySelector(".sheet-subject"),
+    onCleanup: fn => cleanups.push(fn),
     setHead(t, s) {
       el.querySelector("#sheetTitle").textContent = t;
       const p = el.querySelector(".sheet-sub");
@@ -712,6 +723,33 @@ function openSheet({ title, sub = "", onDismiss = null }) {
 
 const CONF_LABEL = { high: "Likely", medium: "Maybe", low: "Long shot" };
 const CONF_CLASS = { high: "ok", medium: "fertilize", low: "" };
+
+/* Pin the photo being identified to the top of a drawer.
+
+   Going through a batch, every photo is a different plant — being asked
+   "which one is it?" with no sight of the plant in question is guesswork.
+   It shows from the moment the drawer opens, before the answer comes back,
+   and stays put while the candidate list scrolls underneath.
+
+   Tapping switches between a cropped strip and the whole frame uncropped:
+   the crop is the right size to sit above the options, but the detail that
+   settles an identification is often at the edge of the shot. */
+function showSubjectPhoto(sheet, blob) {
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  sheet.onCleanup(() => URL.revokeObjectURL(url));
+  sheet.subject.hidden = false;
+  sheet.subject.innerHTML = `
+    <button type="button" class="subject-shot" id="subjectShot" aria-label="Show the whole photo">
+      <img src="${url}" alt="The photo being identified">
+      <span class="subject-tag">Your photo</span>
+    </button>`;
+  const btn = sheet.subject.querySelector("#subjectShot");
+  btn.addEventListener("click", () => {
+    const full = btn.classList.toggle("full");
+    btn.setAttribute("aria-label", full ? "Crop the photo back" : "Show the whole photo");
+  });
+}
 
 // ----- Add / edit -----
 // Adding runs in two steps: photograph the plant and confirm what it is, then
@@ -810,6 +848,7 @@ async function viewAddEdit(editId = null) {
       sub: [batchLabel(), "Reading leaf shape, habit, and setting."].filter(Boolean).join(" · "),
       onDismiss: () => apply({}),
     });
+    showSubjectPhoto(sheet, photo);
     sheet.body.innerHTML = `<div class="cand-row"><div class="cand skeleton"></div></div>`.repeat(3);
 
     let id;
