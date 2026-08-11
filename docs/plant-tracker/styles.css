@@ -2,6 +2,11 @@
    Monochrome scaffolding on a warm ground; photography carries the color.
    Typeface: San Francisco via -apple-system (SF Pro Display kicks in >20px). */
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* The UA rule for [hidden] is display:none at the lowest possible precedence,
+   so any author rule that sets display — .plant-nav is flex, .icon-btn is grid
+   — silently beats it and the element stays on screen with hidden="true" set.
+   Everything here toggles visibility through the attribute, so it has to win. */
+[hidden] { display: none !important; }
 
 :root {
   --ground: #efede9;
