@@ -453,6 +453,62 @@ function plantEmoji(p) { return guideEntry(p.speciesKey).emoji; }
 // ---------------------------------------------------------------------------
 
 // ----- Today -----
+/* Where the collection stands right now: the average of every plant that has
+   been checked. Plants without a score aren't counted as zero — they're
+   unknown, and reported separately so the average can't quietly be an average
+   of two plants out of twenty. */
+function gardenHealth(plants) {
+  const scored = plants.filter(p => !p.archived && p.health && typeof p.health.score === "number");
+  const live = plants.filter(p => !p.archived);
+  if (!scored.length) return { scored: 0, total: live.length, avg: null };
+  const avg = scored.reduce((s, p) => s + p.health.score, 0) / scored.length;
+  const band = avg >= 8 ? "Thriving" : avg >= 6.5 ? "Healthy" : avg >= 5 ? "Fair" : "Needs attention";
+  return { scored: scored.length, total: live.length, avg, band, ailing: scored.filter(p => p.health.score <= 5).length };
+}
+
+/* Average health per day, from the health checks actually recorded.
+
+   Every check writes a log with a score, so the history is already there. A
+   day's value is the mean of the checks made that day — not of every plant,
+   since most plants aren't checked on most days, and carrying forward stale
+   scores would draw a confident line through data that doesn't exist. */
+function healthSeries(logs, days = 90) {
+  const cutoff = addDays(todayStr(), -days);
+  const byDay = new Map();
+  for (const l of logs) {
+    if (l.type !== "ai" || typeof l.score !== "number") continue;
+    const day = l.at.slice(0, 10);
+    if (day < cutoff) continue;
+    const at = byDay.get(day) || [];
+    at.push(l.score);
+    byDay.set(day, at);
+  }
+  return [...byDay.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([date, scores]) => ({ date, avg: scores.reduce((s, n) => s + n, 0) / scores.length }));
+}
+
+/* A sparkline, drawn only when there is something to draw.
+
+   Two points is the minimum that can honestly be called a trend; below that
+   the caller shows the score alone. Fixed 0-10 domain rather than fitting to
+   the data, so a wobble between 7.1 and 7.4 looks like the flat line it is
+   instead of a dramatic climb. */
+function healthSparkline(series) {
+  if (series.length < 2) return "";
+  const w = 240, h = 44, pad = 3;
+  const x = i => pad + (i / (series.length - 1)) * (w - pad * 2);
+  const y = v => pad + (1 - v / 10) * (h - pad * 2);
+  const pts = series.map((d, i) => `${x(i).toFixed(1)},${y(d.avg).toFixed(1)}`);
+  const last = series[series.length - 1];
+  return `
+    <svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+      <polygon class="spark-fill" points="${pad},${h - pad} ${pts.join(" ")} ${w - pad},${h - pad}"></polygon>
+      <polyline class="spark-line" points="${pts.join(" ")}"></polyline>
+      <circle class="spark-dot" cx="${x(series.length - 1).toFixed(1)}" cy="${y(last.avg).toFixed(1)}" r="2.8"></circle>
+    </svg>`;
+}
+
 async function viewToday() {
   const plants = await dbAll("plants");
   const hasOutdoor = plants.some(p => !p.archived && isOutdoorPlant(p));
@@ -462,20 +518,57 @@ async function viewToday() {
   const overdue = care.filter(t => t.delta < 0);
   const dueToday = care.filter(t => t.delta === 0);
   const custom = (await dbAll("tasks")).sort((a, b) => a.done - b.done || b.createdAt.localeCompare(a.createdAt));
-  const season = currentSeason();
 
   const greeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 18 ? "Good afternoon" : "Good evening";
   const dateLine = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
+  // Weather sits in the corner of the greeting rather than in a card of its
+  // own: on most days it's a glance, and the advisories below carry anything
+  // that actually needs acting on.
+  const cur = wx ? (wx.current || {}) : null;
+  const wxCorner = hasOutdoor && wx && typeof cur.temperature_2m === "number"
+    ? `<a class="wx-chip" href="#/settings" title="${esc(state.settings.weather.label || "your spot")}">
+         <span class="wx-chip-icon">${wxEmoji(cur.weather_code)}</span>${Math.round(cur.temperature_2m)}°
+       </a>`
+    : "";
+
+  const gh = gardenHealth(plants);
+  const series = healthSeries(await dbAll("logs"));
+  const spark = healthSparkline(series);
+
   let html = `
-    <h1>${greeting}, ${esc(state.settings.activeUser)}</h1>
-    <p class="subtitle">${dateLine}</p>
-    <div class="stat-row">
-      <div class="stat"><div class="num">${plants.filter(p => !p.archived).length}</div><div class="lbl">Plants</div></div>
-      <div class="stat"><div class="num" style="${overdue.length ? 'color:var(--red)' : ''}">${overdue.length}</div><div class="lbl">Overdue</div></div>
-      <div class="stat"><div class="num">${dueToday.length}</div><div class="lbl">Due today</div></div>
-    </div>
-    <div class="tip-card">${SEASONAL_TIPS[season]}</div>`;
+    <div class="today-head">
+      <div>
+        <h1 class="greeting">${greeting}, <b>${esc(state.settings.activeUser)}</b></h1>
+        <p class="subtitle">${dateLine}</p>
+      </div>
+      ${wxCorner}
+    </div>`;
+
+  // One card for how the collection is doing, replacing the three loose stats
+  // and the seasonal message.
+  if (gh.total) {
+    html += `
+      <div class="card flat garden-card">
+        <div class="garden-main">
+          <div class="garden-figure">
+            <div class="garden-score">${gh.avg === null ? "—" : gh.avg.toFixed(1)}</div>
+            <div class="garden-band">${gh.avg === null ? "Not checked yet" : esc(gh.band)}</div>
+          </div>
+          ${spark || ""}
+        </div>
+        <div class="garden-stats">
+          <span><b>${gh.total}</b> plant${gh.total === 1 ? "" : "s"}</span>
+          <span class="${overdue.length ? "is-overdue" : ""}"><b>${overdue.length}</b> overdue</span>
+          <span><b>${dueToday.length}</b> due today</span>
+          ${gh.avg === null
+            ? `<span class="garden-muted">no health checks yet</span>`
+            : gh.scored < gh.total
+              ? `<span class="garden-muted">${gh.scored} of ${gh.total} checked</span>`
+              : ""}
+        </div>
+      </div>`;
+  }
 
   // Porch weather: live conditions + advice for outdoor plants
   if (hasOutdoor) {
@@ -486,20 +579,15 @@ async function viewToday() {
         <a class="btn small secondary" href="#/settings">Set location in Settings</a>
       </div>`;
     } else if (wx) {
-      const cur = wx.current || {};
-      const today0 = wxDay(wx, 0);
-      const deg = "°";
+      // The numbers moved to the chip in the header. Only advisories earn space
+      // here, and only when there is one — "nothing dramatic in the forecast"
+      // was a card's worth of furniture to say nothing.
       const advisories = weatherAdvisories(wx);
-      html += `<div class="card flat wx-card">
-        <div class="wx-now">
-          <span class="wx-temp">${wxEmoji(cur.weather_code)} ${Math.round(cur.temperature_2m)}${deg}</span>
-          <span class="wx-range">${today0 ? `H ${Math.round(today0.tmax)}${deg} · L ${Math.round(today0.tmin)}${deg}${today0.rain >= 1 ? ` · 🌧️ ${today0.rain.toFixed(1)} mm` : ""}` : ""}</span>
-          <span class="wx-loc">📍 ${esc(state.settings.weather.label || "your spot")}</span>
-        </div>
-        ${advisories.length
-          ? advisories.map(a => `<div class="wx-advice">${a.icon} ${esc(a.text)}</div>`).join("")
-          : `<div class="wx-advice">✅ Nothing dramatic in the forecast — regular care applies.</div>`}
-      </div>`;
+      if (advisories.length) {
+        html += `<div class="card flat wx-card">
+          ${advisories.map(a => `<div class="wx-advice">${a.icon} ${esc(a.text)}</div>`).join("")}
+        </div>`;
+      }
     } else {
       html += `<div class="card flat wx-card"><b>Porch weather</b><p class="subtitle" style="margin:6px 0 0">Couldn't reach the weather service — using your normal schedule for now.</p></div>`;
     }

@@ -204,6 +204,56 @@ body.swipe-nav .view { touch-action: pan-y pinch-zoom; }
 .badge.ok { background: var(--grow-bg); color: var(--grow); }
 
 /* ---------- Stats: numbers, not boxes ---------- */
+/* ---------- Today header ---------- */
+.today-head { display: flex; align-items: flex-start; gap: 12px; }
+.today-head > div:first-child { flex: 1; min-width: 0; }
+/* Light by default with the name carrying the weight — the greeting is
+   context, the person is the content. Needs to out-specify `.view h1`, which
+   sets 700 and caps the line at 12ch; this one shares its row with the weather
+   chip and reads better on one or two lines than three. */
+.view h1.greeting {
+  font-weight: 280; font-size: 33px; letter-spacing: -0.03em;
+  line-height: 1.08; max-width: none; margin-top: 4px;
+}
+.view h1.greeting b { font-weight: 660; letter-spacing: -0.035em; }
+/* Weather as a glance in the corner rather than a card of numbers. */
+.wx-chip {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  padding: 6px 12px 6px 9px; border-radius: var(--r-pill);
+  background: var(--surface); border: 1px solid var(--hairline);
+  color: var(--ink-2); font-size: 14px; font-weight: 600;
+  text-decoration: none; font-variant-numeric: tabular-nums; margin-top: 4px;
+}
+.wx-chip-icon { font-size: 15px; }
+
+/* ---------- Garden health ---------- */
+.garden-card { margin: 14px 0 26px; }
+.garden-main { display: flex; align-items: center; gap: 16px; }
+.garden-figure { flex: none; }
+.garden-score {
+  font-size: 38px; font-weight: 700; letter-spacing: -0.05em; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.garden-band { font-size: 13px; color: var(--ink-2); font-weight: 560; margin-top: 4px; }
+.garden-stats {
+  display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 16px;
+  padding-top: 13px; border-top: 1px solid var(--hairline);
+  font-size: 13.5px; color: var(--ink-2); letter-spacing: -0.01em;
+}
+.garden-stats b { color: var(--ink); font-weight: 680; font-variant-numeric: tabular-nums; }
+.garden-stats .is-overdue b { color: var(--alert); }
+.garden-muted { color: var(--ink-3); }
+
+/* The trend line. Fixed 0-10 domain, so a flat stretch reads as flat. */
+.spark { flex: 1; min-width: 0; height: 44px; display: block; overflow: visible; }
+.spark-line {
+  fill: none; stroke: var(--grow); stroke-width: 1.75;
+  stroke-linecap: round; stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.spark-fill { fill: var(--grow); opacity: .10; stroke: none; }
+.spark-dot { fill: var(--grow); }
+
 .stat-row {
   display: flex; margin: 4px 0 32px; padding: 0;
   background: none; border: none;
@@ -600,11 +650,8 @@ body.sheet-open { overflow: hidden; }
 
 /* ---------- Weather ---------- */
 .wx-card { background: var(--surface); }
-.wx-now { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-.wx-temp { font-size: 40px; font-weight: 700; letter-spacing: -0.045em; line-height: 1; font-variant-numeric: tabular-nums; }
-.wx-range { font-size: 13px; color: var(--ink-2); font-weight: 500; }
-.wx-loc { font-size: 11px; color: var(--ink-3); margin-left: auto; letter-spacing: .03em; }
 .wx-advice { font-size: 15px; padding: 11px 0; border-top: 1px solid var(--hairline); letter-spacing: -0.01em; }
+.wx-advice:first-child { border-top: none; padding-top: 2px; }
 .wx-tag { color: var(--cool); font-weight: 600; }
 .wx-tag.hot { color: var(--alert); }
 
