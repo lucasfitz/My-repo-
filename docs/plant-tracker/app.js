@@ -459,6 +459,49 @@ function potSummary(p) {
   return parts.join(" + ");
 }
 
+/* Species rows show a photograph of the plant, not a stand-in glyph. The
+   image arrives after the row does, so each row renders a slot and gets
+   filled as lookups land. Requests are aborted when the query moves on, and
+   results are cached per-device, so typing doesn't re-fetch what it just saw. */
+let speciesThumbAbort = null;
+function speciesRowsHTML(hits) {
+  return hits.map(g => `
+    <div class="ac-item" data-key="${g.key}">
+      <span class="ac-thumb" data-thumb-key="${g.key}"></span>
+      <span class="ac-text"><span class="ac-name">${esc(g.name)}</span>
+      <span class="ac-latin">${esc(g.latin)}</span></span>
+    </div>`).join("");
+}
+
+function fillSpeciesThumbs(container, hits) {
+  if (speciesThumbAbort) speciesThumbAbort.abort();
+  speciesThumbAbort = new AbortController();
+  const signal = speciesThumbAbort.signal;
+  hits.forEach(async g => {
+    try {
+      const url = await speciesThumb(g.latin, g.name, signal);
+      if (signal.aborted) return;
+      const slot = container.querySelector(`[data-thumb-key="${g.key}"]`);
+      if (slot && url) {
+        // Decode before inserting, so a photo that fails to load leaves the
+        // neutral slot instead of a broken-image icon. Deliberately not
+        // loading="lazy": that defers until the element is in the viewport,
+        // and this one is off-document until it has loaded — which would
+        // mean it never loads at all.
+        const img = new Image();
+        img.alt = "";
+        img.onload = () => {
+          if (!slot.isConnected) return;
+          slot.innerHTML = "";
+          slot.appendChild(img);
+          slot.classList.add("has-img");
+        };
+        img.src = url;
+      }
+    } catch { /* aborted or offline — the slot stays neutral */ }
+  });
+}
+
 // ----- Plants list -----
 async function viewPlants() {
   const plants = (await dbAll("plants")).filter(p => !p.archived)
@@ -735,7 +778,7 @@ async function viewAddEdit(editId = null) {
     sheet.body.innerHTML = cands.map((c, i) => `
       <div class="cand-row">
         <button type="button" class="cand" data-i="${i}" aria-pressed="false">
-          <span class="cand-thumb" data-thumb="${i}">${esc(guideEntry(c.species_key).emoji || "🌿")}</span>
+          <span class="cand-thumb" data-thumb="${i}"></span>
           <span class="cand-main">
             <span class="cand-name">${esc(c.common_name)}</span>
             ${c.latin_name ? `<span class="cand-latin">${esc(c.latin_name)}</span>` : ""}
@@ -790,7 +833,7 @@ async function viewAddEdit(editId = null) {
         ? `<div class="cand-ex-label">Example photos of ${esc(c.latin_name || c.common_name)}</div>
            <div class="cand-ex-strip">${examples[i]
              .map(u => `<img src="${esc(u)}" alt="Example ${esc(c.common_name)}" loading="lazy">`).join("")}</div>`
-        : `<div class="cand-ex-label">No example photos available — check the name against the guide.</div>`;
+        : `<div class="cand-ex-label">No photos found for this one — check the botanical name against the guide.</div>`;
     }
 
     rows.forEach((r, i) => r.addEventListener("click", () => select(i)));
@@ -980,12 +1023,13 @@ async function viewAddEdit(editId = null) {
       .map(g => ({ g, rank: rankSpecies(g, q) }))
       .filter(x => x.rank < 99)
       .sort((a, b) => a.rank - b.rank || a.g.name.localeCompare(b.g.name))
-      .slice(0, 12)
+      .slice(0, 8)
       .map(x => x.g);
     sList.innerHTML = hits.length
-      ? hits.map(g => `<div class="ac-item" data-key="${g.key}">${g.emoji} ${esc(g.name)} <span class="ac-latin">${esc(g.latin)}</span></div>`).join("")
+      ? speciesRowsHTML(hits)
       : `<div class="ac-item ac-none">No match — it'll be saved as a custom species with default care</div>`;
     sList.hidden = false;
+    if (hits.length) fillSpeciesThumbs(sList, hits);
   });
   sList.addEventListener("mousedown", e => {
     const item = e.target.closest(".ac-item");
@@ -1030,9 +1074,10 @@ async function viewAddEdit(editId = null) {
       .slice(0, 8)
       .map(x => x.g);
     alsoList.innerHTML = hits.length
-      ? hits.map(g => `<div class="ac-item" data-key="${g.key}">${g.emoji} ${esc(g.name)} <span class="ac-latin">${esc(g.latin)}</span></div>`).join("")
+      ? speciesRowsHTML(hits)
       : `<div class="ac-item ac-none">No match</div>`;
     alsoList.hidden = false;
+    if (hits.length) fillSpeciesThumbs(alsoList, hits);
   });
   alsoList.addEventListener("mousedown", e => {
     const item = e.target.closest(".ac-item");

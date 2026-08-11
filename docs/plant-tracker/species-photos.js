@@ -21,10 +21,10 @@ function examplesCache() {
   catch { return {}; }
 }
 
-function examplesCachePut(key, urls) {
+function examplesCachePut(key, urls, partial = false) {
   try {
     const all = examplesCache();
-    all[key] = { urls, at: Date.now() };
+    all[key] = { urls, at: Date.now(), partial };
     // Keep the cache from growing without bound — 200 species is well past
     // anyone's collection, and the oldest entries are the least useful.
     const keys = Object.keys(all);
@@ -33,6 +33,11 @@ function examplesCachePut(key, urls) {
     }
     localStorage.setItem(EXAMPLES_CACHE_KEY, JSON.stringify(all));
   } catch { /* private mode or full quota — the network path still works */ }
+}
+
+function examplesCachePartial(key) {
+  const hit = examplesCache()[key];
+  return !!(hit && hit.partial);
 }
 
 function examplesCacheGet(key) {
@@ -71,11 +76,40 @@ async function wikiThumb(title, signal) {
 /* Up to `limit` example photos of a species. Tries the botanical name first —
    it redirects reliably and disambiguates common names that mean different
    plants in different places — then the common name. */
+/* One image, as cheaply as possible: the summary endpoint returns a single
+   lead thumbnail, where media-list returns the page's whole gallery. Search
+   renders a dozen rows per keystroke, so the difference matters. */
+async function speciesThumb(latinName, commonName, signal = null) {
+  const cacheKey = (latinName || commonName || "").trim().toLowerCase();
+  if (!cacheKey) return "";
+  const cached = examplesCacheGet(cacheKey);
+  if (cached) return cached[0] || "";
+
+  const titles = [latinName, commonName].map(t => (t || "").trim()).filter(Boolean);
+  for (const title of titles) {
+    try {
+      const urls = await wikiThumb(title, signal);
+      if (urls.length) {
+        // Marked partial: this is the lead image only, so a later caller that
+        // wants the full strip knows to go back for it.
+        examplesCachePut(cacheKey, urls, true);
+        return urls[0];
+      }
+    } catch (err) {
+      if (err.name === "AbortError") throw err;
+    }
+  }
+  examplesCachePut(cacheKey, [], true);
+  return "";
+}
+
 async function speciesExamples(latinName, commonName, limit = 3, signal = null) {
   const cacheKey = (latinName || commonName || "").trim().toLowerCase();
   if (!cacheKey) return [];
   const cached = examplesCacheGet(cacheKey);
-  if (cached) return cached.slice(0, limit);
+  // A partial entry holds only the lead image — go back for the rest if the
+  // caller actually wants a strip.
+  if (cached && !(examplesCachePartial(cacheKey) && limit > 1)) return cached.slice(0, limit);
 
   const titles = [latinName, commonName].map(t => (t || "").trim()).filter(Boolean);
   let urls = [];
