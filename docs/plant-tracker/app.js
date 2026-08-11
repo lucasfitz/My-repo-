@@ -816,11 +816,30 @@ async function viewAddEdit(editId = null) {
     showHint();
   };
 
+  // With a few hundred species, filtering alone puts "Mini Monstera" above
+  // "Monstera". Rank by how well the match starts, not just whether it matches.
+  const rankSpecies = (g, q) => {
+    const name = g.name.toLowerCase(), latin = g.latin.toLowerCase();
+    if (name === q) return 0;
+    if (name.startsWith(q)) return 1;
+    if (latin.startsWith(q)) return 2;
+    // A match at a word boundary beats one buried mid-word.
+    if (new RegExp("\\b" + q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(name)) return 3;
+    if (name.includes(q)) return 4;
+    if (latin.includes(q)) return 5;
+    return 99;
+  };
+
   sInput.addEventListener("input", () => {
     const q = sInput.value.trim().toLowerCase();
     if (!q) { sList.hidden = true; hint.textContent = ""; return; }
-    const hits = PLANT_GUIDE.filter(g => g.key !== "other" &&
-      (g.name.toLowerCase().includes(q) || g.latin.toLowerCase().includes(q))).slice(0, 12);
+    const hits = PLANT_GUIDE
+      .filter(g => g.key !== "other")
+      .map(g => ({ g, rank: rankSpecies(g, q) }))
+      .filter(x => x.rank < 99)
+      .sort((a, b) => a.rank - b.rank || a.g.name.localeCompare(b.g.name))
+      .slice(0, 12)
+      .map(x => x.g);
     sList.innerHTML = hits.length
       ? hits.map(g => `<div class="ac-item" data-key="${g.key}">${g.emoji} ${esc(g.name)} <span class="ac-latin">${esc(g.latin)}</span></div>`).join("")
       : `<div class="ac-item ac-none">No match — it'll be saved as a custom species with default care</div>`;
