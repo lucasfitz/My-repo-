@@ -615,7 +615,7 @@ function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
       })}
       ${section("Issues", issues.map(i =>
         `<div class="ai-item ai-issue-${esc(i.severity)}">· <b>${esc(i.issue)}</b> — ${esc(i.action)}</div>`).join(""),
-        { open: issues.some(i => i.severity === "high"), count: issues.length })}
+        { count: issues.length })}
       ${section("Observed", observations.map(o => `<div class="ai-item">· ${esc(o)}</div>`).join(""),
         { count: observations.length })}
     </div>`;
@@ -629,8 +629,9 @@ function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
    count on the header so a collapsed section still tells you whether it is
    worth opening.
 
-   What to do is open by default because it is the point; issues open only when
-   something is serious; observations are supporting evidence and start shut.
+   Only "What to do" starts open — it is the part you act on. Issues and
+   observations are why, not what, and both start shut: the count on the header
+   is enough to decide whether to look.
 
    <details> rather than a click handler: it keeps the disclosure semantics,
    works before any JS runs, and survives the re-render after a step is added. */
