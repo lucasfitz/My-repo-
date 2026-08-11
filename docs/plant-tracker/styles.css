@@ -522,8 +522,27 @@ body.sheet-open { overflow: hidden; }
 
 /* ---------- Guide ---------- */
 .guide-item { cursor: pointer; }
+.guide-head { display: flex; gap: 12px; align-items: center; min-width: 0; }
+.guide-thumb {
+  width: 52px; height: 52px; flex: none; border-radius: 14px; overflow: hidden;
+  display: grid; place-items: center; background: var(--surface-sunk);
+}
+/* Same quiet placeholder as the identification rows — never a stand-in glyph. */
+.guide-thumb:not(.has-img)::after {
+  content: ""; display: block; width: 100%; height: 100%;
+  background: linear-gradient(135deg, transparent 46%, var(--hairline) 46%, var(--hairline) 54%, transparent 54%);
+}
+.guide-thumb.has-img { background: none; }
+.guide-thumb.has-img::after { content: none; }
+.guide-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .guide-name { font-weight: 700; font-size: 17px; letter-spacing: -0.025em; }
 .guide-latin { font-style: italic; color: var(--ink-2); font-size: 13px; }
+/* Which of your plants this entry is actually about. */
+.guide-mine { font-size: 12.5px; color: var(--grow); margin-top: 3px; font-weight: 600; }
+.guide-yours {
+  display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  background: var(--surface-sunk); font-size: 12px; color: var(--ink-2); font-weight: 560;
+}
 .guide-detail { margin-top: 12px; font-size: 15px; display: grid; gap: 7px; letter-spacing: -0.01em; }
 .guide-detail div b { color: var(--ink); }
 

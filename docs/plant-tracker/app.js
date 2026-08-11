@@ -94,6 +94,39 @@ async function migrateSettings() {
     await saveSettings();
     await renameInHistory(RENAMES);
   }
+  await migrateFeedingSchedules();
+}
+
+/* A plant copies its schedule out of the guide when it's added, so correcting
+   the guide leaves every plant already in the app on the old number.
+
+   Only schedules still sitting on the old guide default get moved — if the
+   value has been changed since, by hand or by a health check, it's a decision
+   and stays put. Keyed by the old value so this is safe to run every launch.
+   Once these species have aged out of everyone's app this can go. */
+const FEEDING_CORRECTIONS = {
+  // Mediterranean herbs: lean soil is what keeps the oils strong.
+  rosemary: [30, 60], sage: [30, 60], thyme: [30, 60],
+  oregano: [30, 60], marjoram: [30, 60], tarragon: [30, 60],
+  salvia: [30, 60], lavender: [45, 0],
+  // Legumes fix their own nitrogen; feeding buys leaves instead of pods.
+  peas: [30, 0], "green-beans": [30, 0],
+  // A root crop fed on nitrogen forks and goes hairy.
+  carrot: [30, 0],
+  // Poor soil is what makes it flower.
+  "moss-rose": [30, 60],
+  // Hungry growers that were on a generic monthly default.
+  ginger: [30, 21], turmeric: [30, 21], amaryllis: [30, 21], bonsai: [30, 14],
+};
+
+async function migrateFeedingSchedules() {
+  const plants = await dbAll("plants");
+  for (const p of plants) {
+    const fix = FEEDING_CORRECTIONS[p.speciesKey];
+    if (!fix || p.fertEvery !== fix[0]) continue;
+    p.fertEvery = fix[1];
+    await saveRecord("plants", p);
+  }
 }
 
 // History carries the name it was written with; leaving it behind would mean
@@ -514,6 +547,7 @@ async function viewPlants() {
       <button class="pill ${groupBy === "name" ? "active" : ""}" data-group="name">All</button>
       <button class="pill ${groupBy === "room" ? "active" : ""}" data-group="room">By room</button>
       <button class="pill ${groupBy === "due" ? "active" : ""}" data-group="due">Needs water</button>
+      <button class="pill ${groupBy === "health" ? "active" : ""}" data-group="health">By health</button>
     </div>`;
 
   if (!plants.length) {
@@ -561,6 +595,31 @@ async function viewPlants() {
       return { card: cards[i], delta: due ? daysBetween(todayStr(), due) : Infinity };
     }).sort((a, b) => a.delta - b.delta);
     html += `<div class="plant-grid" id="plantGrid">${order.map(o => o.card).join("")}</div>`;
+  } else if (groupBy === "health") {
+    // Worst first — the point of this order is to surface what needs help.
+    // Plants never checked have no score to rank on and sit at the end under
+    // their own heading, rather than being scored 0 and jumping the queue.
+    const scored = [], unchecked = [];
+    plants.forEach((p, i) => {
+      const score = p.health && typeof p.health.score === "number" ? p.health.score : null;
+      (score === null ? unchecked : scored).push({ card: cards[i], score, name: p.name });
+    });
+    scored.sort((a, b) => a.score - b.score || a.name.localeCompare(b.name));
+    if (scored.length) {
+      html += `<div class="plant-group">
+        <div class="group-head"><h2>Needs the most help</h2><span class="group-count">${scored.length}</span></div>
+        <div class="plant-grid">${scored.map(o => o.card).join("")}</div>
+      </div>`;
+    } else {
+      html += `<div class="card flat"><b>No health checks yet</b>
+        <p class="subtitle" style="margin:6px 0 0">Open a plant and run a health check, or add a photo — one runs automatically.</p></div>`;
+    }
+    if (unchecked.length) {
+      html += `<div class="plant-group">
+        <div class="group-head"><h2>Not checked yet</h2><span class="group-count">${unchecked.length}</span></div>
+        <div class="plant-grid">${unchecked.map(o => o.card).join("")}</div>
+      </div>`;
+    }
   } else {
     html += `<div class="plant-grid" id="plantGrid">${cards.join("")}</div>`;
   }
@@ -1167,6 +1226,9 @@ async function viewAddEdit(editId = null) {
     if (!editing) {
       if (photo) {
         await saveRecord("photos", { id: uid(), plantId: plant.id, blob: photo, createdAt: new Date().toISOString() });
+        // The photo that identified it can also grade it — one check per new
+        // plant, in the background, so a bulk add still moves at photo speed.
+        autoAssess(plant.id);
       }
       await saveRecord("logs", { id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: state.settings.activeUser, note: "Added to the collection" });
     }
@@ -1340,7 +1402,8 @@ async function viewPlant(id) {
           : "Claude reads the photos, care history, and conditions to assess health and turn what it finds into steps."
         : "Add your Anthropic API key in Settings to enable AI health checks."}</p>
       ${aiConfigured()
-        ? `<button class="btn secondary" id="btnAiCheck">${p.health ? "Check again" : "Check health"}</button>
+        ? `<button class="btn secondary" id="btnAiCheck"${assessInFlight(p.id) ? " disabled" : ""}>${
+             assessInFlight(p.id) ? "Looking at your plant…" : p.health ? "Check again" : "Check health"}</button>
            <div id="aiResult">${p.health ? renderAssessment(p.health, { plantId: p.id, addedIds }) : ""}</div>`
         : `<a class="btn small secondary" href="#/settings">Set up in Settings</a>`}
     </div>
@@ -1377,7 +1440,7 @@ async function viewPlant(id) {
       btnAi.textContent = "Looking at your plant…";
       box.innerHTML = "";
       try {
-        await aiAssessPlant(id);
+        await assessNow(id);
         render();  // the score belongs on the pill row and the grid too, not just here
       } catch (err) {
         box.innerHTML = `<p class="subtitle" style="margin-top:10px">⚠️ ${esc(err.message)}</p>`;
@@ -1409,7 +1472,8 @@ async function viewPlant(id) {
     if (!file) return;
     try {
       await addPhoto(id, file);
-      toast("Photo saved");
+      toast(aiConfigured() ? "Photo saved — checking health…" : "Photo saved");
+      autoAssess(id);
       render();
     } catch { toast("Couldn't read that image"); }
   });
@@ -1442,37 +1506,147 @@ async function openPhotoViewer(photoId, plantId) {
 }
 
 // ----- Guide -----
+/* Every species the collection actually contains — the plant's own species,
+   plus anything else sharing its pot. Maps a guide key to the plants it
+   covers, so the guide can say "this is your Monty and your Vera". */
+async function ownedSpecies() {
+  const plants = (await dbAll("plants")).filter(p => !p.archived);
+  const owned = new Map();
+  const add = (key, plant) => {
+    if (!key) return;
+    if (!owned.has(key)) owned.set(key, { g: guideEntry(key), plants: [] });
+    const entry = owned.get(key);
+    if (!entry.plants.some(p => p.id === plant.id)) entry.plants.push(plant);
+  };
+  plants.forEach(p => {
+    add(p.speciesKey || "other", p);
+    (p.alsoContains || []).forEach(a => add(a.key, p));
+  });
+  return owned;
+}
+
+// A guide entry is advice; the plant's own schedule is what the app actually
+// runs on. Where the two disagree — because a health check rewrote the plan,
+// or someone edited it — the guide should show what's really set.
+function scheduleNote(plants, guide, field, guideDays) {
+  const set = [...new Set(plants.map(p => p[field]).filter(n => typeof n === "number" && n > 0))];
+  if (!set.length || (set.length === 1 && set[0] === guideDays)) return "";
+  return ` <span class="guide-yours">yours: every ${set.sort((a, b) => a - b).join(" / ")}d</span>`;
+}
+
 async function viewGuide() {
   const season = currentSeason();
+  const owned = await ownedSpecies();
+  // "Other" is a placeholder for a species we have no care data on — real
+  // advice for it doesn't exist, so it stays out of the personalised list.
+  const mine = [...owned.values()]
+    .filter(o => o.g.key !== "other" && o.g.latin)
+    .sort((a, b) => a.g.name.localeCompare(b.g.name));
+  const unknown = owned.get("other");
+
+  const card = (g, plants) => `
+    <div class="card guide-item" data-name="${g.name.toLowerCase()} ${g.latin.toLowerCase()}">
+      <div class="guide-head">
+        <div class="guide-thumb" data-latin="${esc(g.latin)}" data-common="${esc(g.name)}"></div>
+        <div>
+          <div class="guide-name">${esc(g.name)}</div>
+          <div class="guide-latin">${esc(g.latin)}</div>
+          ${plants ? `<div class="guide-mine">${plants.map(p => esc(p.name)).join(", ")}</div>` : ""}
+        </div>
+      </div>
+      <div class="guide-detail" hidden>
+        <div><b>💧 Water:</b> every ~${g.waterDays} days${plants ? scheduleNote(plants, g, "waterEvery", g.waterDays) : ""}</div>
+        <div><b>🌾 Fertilize:</b> ${g.fertDays
+          ? `every ~${g.fertDays} days (spring–summer)${plants ? scheduleNote(plants, g, "fertEvery", g.fertDays) : ""}`
+          : "not needed — this one does better unfed"}</div>
+        <div><b>☀️ Light:</b> ${esc(g.light)}</div>
+        <div><b>💡 Tip:</b> ${esc(g.tips)}</div>
+      </div>
+    </div>`;
+
   $view().innerHTML = `
     <h1>Care guide</h1>
-    <p class="subtitle">Suggested schedules & tips for ${PLANT_GUIDE.length - 1} common houseplants.</p>
+    <p class="subtitle">${mine.length
+      ? `Care for the ${mine.length} species in your collection${season ? `, and what they need in ${season}` : ""}.`
+      : `Suggested schedules & tips for ${PLANT_GUIDE.length - 1} common houseplants.`}</p>
     <div class="tip-card">${SEASONAL_TIPS[season]}</div>
-    <div class="search-bar"><input type="text" id="guideSearch" placeholder="Search species…"></div>
-    ${PLANT_GUIDE.filter(g => g.key !== "other").map(g => `
-      <div class="card guide-item" data-name="${g.name.toLowerCase()} ${g.latin.toLowerCase()}">
-        <div class="guide-name">${g.emoji} ${g.name}</div>
-        <div class="guide-latin">${g.latin}</div>
-        <div class="guide-detail" hidden>
-          <div><b>💧 Water:</b> every ~${g.waterDays} days</div>
-          <div><b>🌾 Fertilize:</b> every ~${g.fertDays} days (spring–summer)</div>
-          <div><b>☀️ Light:</b> ${g.light}</div>
-          <div><b>💡 Tip:</b> ${g.tips}</div>
-        </div>
-      </div>`).join("")}`;
 
-  $view().querySelectorAll(".guide-item").forEach(item => {
-    item.addEventListener("click", () => {
-      const d = item.querySelector(".guide-detail");
-      d.hidden = !d.hidden;
+    ${mine.length ? `
+      <div class="section-head"><h2>Your plants</h2></div>
+      ${mine.map(o => card(o.g, o.plants)).join("")}
+      ${unknown ? `<div class="card flat"><b>Not yet identified</b>
+        <p class="subtitle" style="margin:6px 0 0">${unknown.plants.map(p => esc(p.name)).join(", ")} — set a species on ${
+          unknown.plants.length > 1 ? "these" : "this one"} and its care lands here.</p></div>` : ""}
+    ` : `<div class="card flat"><b>Nothing here yet</b>
+      <p class="subtitle" style="margin:6px 0 0">Add a plant and its care notes show up at the top of this page.</p></div>`}
+
+    <div class="section-head"><h2>All species</h2></div>
+    <div class="search-bar"><input type="text" id="guideSearch" placeholder="Search ${PLANT_GUIDE.length - 1} species…"></div>
+    <div id="guideAll" hidden></div>
+    <button class="btn block secondary" id="guideBrowse">Browse all ${PLANT_GUIDE.length - 1} species</button>`;
+
+  const all = document.getElementById("guideAll");
+  const browse = document.getElementById("guideBrowse");
+  const search = document.getElementById("guideSearch");
+  let built = false;
+
+  // A few hundred cards is a lot to hand the browser for a page most people
+  // open to check one plant — so the full list is built only when asked for.
+  const buildAll = () => {
+    if (built) return;
+    all.innerHTML = PLANT_GUIDE.filter(g => g.key !== "other").map(g => card(g, null)).join("");
+    built = true;
+    wireCards(all);
+  };
+
+  const wireCards = (root) => {
+    root.querySelectorAll(".guide-item").forEach(item => {
+      if (item.dataset.wired) return;
+      item.dataset.wired = "1";
+      item.addEventListener("click", () => {
+        const d = item.querySelector(".guide-detail");
+        d.hidden = !d.hidden;
+        if (!d.hidden) fillGuideThumb(item);
+      });
     });
+  };
+  wireCards($view());
+
+  browse.addEventListener("click", () => {
+    buildAll();
+    all.hidden = false;
+    browse.hidden = true;
   });
-  document.getElementById("guideSearch").addEventListener("input", e => {
+
+  search.addEventListener("input", e => {
     const q = e.target.value.trim().toLowerCase();
+    if (q) { buildAll(); all.hidden = false; browse.hidden = true; }
     $view().querySelectorAll(".guide-item").forEach(c => {
       c.style.display = !q || c.dataset.name.includes(q) ? "" : "none";
     });
   });
+
+  // Your own species get their photo straight away — there are only a handful.
+  // The full list stays unfetched until a card is opened.
+  $view().querySelectorAll(".guide-item").forEach(item => {
+    if (item.parentElement === $view()) fillGuideThumb(item);
+  });
+}
+
+async function fillGuideThumb(item) {
+  const slot = item.querySelector(".guide-thumb");
+  if (!slot || slot.dataset.done) return;
+  slot.dataset.done = "1";
+  try {
+    const url = await speciesThumb(slot.dataset.latin, slot.dataset.common);
+    if (!url) return;
+    const img = new Image();
+    img.alt = "";
+    // Same reasoning as the species rows: decode first so a failed load leaves
+    // the neutral slot rather than a broken-image icon.
+    img.onload = () => { slot.innerHTML = ""; slot.appendChild(img); slot.classList.add("has-img"); };
+    img.src = url;
+  } catch { /* the slot just stays neutral */ }
 }
 
 // ----- Pairing (opened from a "Pair another phone" link) -----
