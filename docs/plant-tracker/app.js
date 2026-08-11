@@ -5,7 +5,7 @@
 // IndexedDB wrapper
 // ---------------------------------------------------------------------------
 const DB_NAME = "sprout-db";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let _db = null;
 
 function openDB() {
@@ -26,6 +26,8 @@ function openDB() {
       if (!db.objectStoreNames.contains("tasks")) db.createObjectStore("tasks", { keyPath: "id" });
       if (!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath: "key" });
       if (!db.objectStoreNames.contains("outbox")) db.createObjectStore("outbox", { keyPath: "id" });
+      // Species learned on demand, keyed like the built-in guide entries.
+      if (!db.objectStoreNames.contains("species")) db.createObjectStore("species", { keyPath: "key" });
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
@@ -67,7 +69,9 @@ async function removeRecord(store, id) {
 // ---------------------------------------------------------------------------
 // Settings / household profiles
 // ---------------------------------------------------------------------------
-const state = { settings: { users: ["Lucas", "Kelly"], activeUser: "Lucas", lastNotified: "", rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office", "Porch"] } };
+// waterDays: Sunday and Wednesday by default — twice a week, so nothing waits
+// more than four days, and no watering lands on a weekday morning.
+const state = { settings: { users: ["Lucas", "Kelly"], activeUser: "Lucas", lastNotified: "", waterDays: [0, 3], rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office", "Porch"] } };
 
 async function loadSettings() {
   const row = await dbGet("settings", "main");
@@ -95,6 +99,16 @@ async function migrateSettings() {
     await renameInHistory(RENAMES);
   }
   await migrateFeedingSchedules();
+
+  // One-time: bring plants that were on sub-rhythm schedules onto the twice-
+  // weekly rhythm. Flagged so it never fights a later manual edit — changing
+  // watering days afterwards re-applies it from Settings, on request.
+  if (!state.settings.waterRhythmApplied) {
+    const moved = await applyWaterRhythm();
+    state.settings.waterRhythmApplied = true;
+    await saveSettings();
+    if (moved.length) console.info("Sprout: moved onto the watering rhythm —", moved);
+  }
 }
 
 /* A plant copies its schedule out of the guide when it's added, so correcting
@@ -182,6 +196,78 @@ function dueLabel(dueStr) {
 
 // Due date for an action on a plant. Falls back to createdAt if never done.
 // Outdoor plants' watering interval flexes with the season (weather.js).
+/* Watering days.
+
+   Left to itself, a collection of any size puts something on the list every
+   single day, which nobody actually does. Instead watering collects onto
+   chosen days of the week: on a watering day you do everything that would
+   otherwise come due before the next one.
+
+   Empty means no batching — every plant on its own natural day. */
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function waterDays() {
+  const d = state.settings.waterDays;
+  return Array.isArray(d) ? [...new Set(d.filter(n => Number.isInteger(n) && n >= 0 && n <= 6))].sort() : [];
+}
+
+// The longest run between consecutive watering days — twice a week is a 3-day
+// gap and a 4-day one, so 4 is what a plant has to survive.
+function maxWaterGap(days) {
+  if (!days.length) return Infinity;
+  let max = 0;
+  for (let i = 0; i < days.length; i++) {
+    const next = days[(i + 1) % days.length];
+    max = Math.max(max, i === days.length - 1 ? 7 - days[i] + next : next - days[i]);
+  }
+  return max;
+}
+
+/* Move a watering date back to the most recent watering day.
+
+   Backwards, not forwards: a little early is harmless, whereas rounding up to
+   the next slot could leave a thirsty plant dry for most of a week. A plant
+   that needs water more often than the rhythm's longest gap can't be served by
+   it at all — outdoor pots in summer, mostly — so it keeps its own schedule. */
+function snapToWaterDay(dateStr, every) {
+  const days = waterDays();
+  if (!days.length || every < maxWaterGap(days)) return dateStr;
+  const d = new Date(dateStr + "T12:00:00");
+  for (let i = 0; i < 7; i++) {
+    if (days.includes(d.getDay())) break;
+    d.setDate(d.getDate() - 1);
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+/* Raise anything that wants water more often than the rhythm can give it.
+
+   Snapping alone can't help a plant on a 2-day schedule: it needs attention
+   between watering days, so it stays off the rhythm and keeps putting itself
+   on the list mid-week. Moving it up to the rhythm's longest gap is what
+   actually makes twice a week the whole story.
+
+   Only ever raises — a cactus on 90 days is left alone. Outdoor plants are
+   included, but the seasonal adjustment still shortens their interval in
+   summer, so a hot-weather pot can drift back off the rhythm on its own. */
+async function applyWaterRhythm() {
+  const floor = maxWaterGap(waterDays());
+  if (!Number.isFinite(floor)) return [];
+  const changed = [];
+  for (const p of await dbAll("plants")) {
+    if (p.archived || !p.waterEvery || p.waterEvery >= floor) continue;
+    changed.push({ name: p.name, from: p.waterEvery, to: floor });
+    p.waterEvery = floor;
+    await saveRecord("plants", p);
+  }
+  return changed;
+}
+
+function isWateringDay(dateStr = todayStr()) {
+  const days = waterDays();
+  return !days.length || days.includes(new Date(dateStr + "T12:00:00").getDay());
+}
+
 function nextDue(plant, kind) {
   let every = kind === "water" ? plant.waterEvery : plant.fertEvery;
   if (!every) return null; // schedule disabled
@@ -190,7 +276,8 @@ function nextDue(plant, kind) {
   }
   const last = kind === "water" ? plant.lastWatered : plant.lastFertilized;
   const base = last || plant.createdAt.slice(0, 10);
-  return addDays(base, every);
+  const due = addDays(base, every);
+  return kind === "water" ? snapToWaterDay(due, every) : due;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +315,30 @@ async function logAction(plantId, type, note = "") {
 // ---------------------------------------------------------------------------
 // Photos
 // ---------------------------------------------------------------------------
+/* An object URL pins its blob in memory until it is revoked; dropping the
+   <img> that used it is not enough. The plant screens mint one per photo on
+   every render, and swiping between plants re-renders constantly, so browsing
+   the collection leaked a full-size photo per card. These are handed out for
+   the current view and released when it is replaced. */
+let viewURLs = [];
+function viewURL(blob) {
+  const url = URL.createObjectURL(blob);
+  viewURLs.push(url);
+  return url;
+}
+function releaseViewURLs() {
+  viewURLs.forEach(u => URL.revokeObjectURL(u));
+  viewURLs = [];
+}
+
+/* Sizing a canvas to 0 is what actually frees its pixel buffer — dropping the
+   reference leaves it allocated until the collector runs, which on a phone
+   mid-upload is too late to matter. */
+function releaseCanvas(canvas) {
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
 function resizeImage(file, maxDim = 1400) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -239,7 +350,15 @@ function resizeImage(file, maxDim = 1400) {
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      canvas.toBlob(b => b ? resolve(b) : reject(new Error("encode failed")), "image/jpeg", 0.85);
+      canvas.toBlob(b => {
+        // A phone photo decodes to ~50MB of pixels, and a bulk upload does this
+        // once per file. Dropping the backing store and the decoded image the
+        // moment we have the JPEG keeps the peak to one photo at a time rather
+        // than however many the collector hasn't got round to yet.
+        releaseCanvas(canvas);
+        img.src = "";
+        b ? resolve(b) : reject(new Error("encode failed"));
+      }, "image/jpeg", 0.85);
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
     img.src = url;
@@ -267,7 +386,7 @@ async function latestPhotoURL(plantId) {
   const photos = (await dbAllByIndex("photos", "plantId", plantId)).filter(p => p.blob);
   if (!photos.length) return null;
   photos.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return URL.createObjectURL(photos[0].blob);
+  return viewURL(photos[0].blob);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,8 +405,46 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.hidden = true; }, 2200);
 }
+/* The built-in guide plus everything learned on demand.
+
+   PLANT_GUIDE ships with the app; LEARNED comes from the database and syncs
+   between phones, so a species looked up on one is present on the other. The
+   built-in entry wins on a key collision — it was curated, and a plant already
+   referencing that key expects it. */
+let LEARNED = [];
+
+function allSpecies() {
+  if (!LEARNED.length) return PLANT_GUIDE;
+  const known = new Set(PLANT_GUIDE.map(g => g.key));
+  return PLANT_GUIDE.concat(LEARNED.filter(g => !known.has(g.key)));
+}
+
+async function loadLearnedSpecies() {
+  try { LEARNED = (await dbAll("species")).filter(g => g && g.key && g.name); }
+  catch { LEARNED = []; }
+}
+
+// A key has to be stable and unique: plants store it, so a collision would
+// silently repoint one plant's care at another species.
+function speciesKeyFor(entry) {
+  const base = (entry.latin || entry.name).toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "species";
+  const taken = new Set(allSpecies().map(g => g.key));
+  if (!taken.has(base)) return base;
+  for (let i = 2; i < 100; i++) if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
+  return `${base}-${uid()}`;
+}
+
+async function saveLearnedSpecies(entry) {
+  const rec = { ...entry, key: entry.key || speciesKeyFor(entry), learnedAt: new Date().toISOString() };
+  await saveRecord("species", rec);
+  LEARNED = LEARNED.filter(g => g.key !== rec.key).concat(rec);
+  return rec;
+}
+
 function guideEntry(key) {
-  return PLANT_GUIDE.find(g => g.key === key) || PLANT_GUIDE.find(g => g.key === "other");
+  const all = allSpecies();
+  return all.find(g => g.key === key) || all.find(g => g.key === "other");
 }
 function plantEmoji(p) { return guideEntry(p.speciesKey).emoji; }
 
@@ -296,6 +453,62 @@ function plantEmoji(p) { return guideEntry(p.speciesKey).emoji; }
 // ---------------------------------------------------------------------------
 
 // ----- Today -----
+/* Where the collection stands right now: the average of every plant that has
+   been checked. Plants without a score aren't counted as zero — they're
+   unknown, and reported separately so the average can't quietly be an average
+   of two plants out of twenty. */
+function gardenHealth(plants) {
+  const scored = plants.filter(p => !p.archived && p.health && typeof p.health.score === "number");
+  const live = plants.filter(p => !p.archived);
+  if (!scored.length) return { scored: 0, total: live.length, avg: null };
+  const avg = scored.reduce((s, p) => s + p.health.score, 0) / scored.length;
+  const band = avg >= 8 ? "Thriving" : avg >= 6.5 ? "Healthy" : avg >= 5 ? "Fair" : "Needs attention";
+  return { scored: scored.length, total: live.length, avg, band, ailing: scored.filter(p => p.health.score <= 5).length };
+}
+
+/* Average health per day, from the health checks actually recorded.
+
+   Every check writes a log with a score, so the history is already there. A
+   day's value is the mean of the checks made that day — not of every plant,
+   since most plants aren't checked on most days, and carrying forward stale
+   scores would draw a confident line through data that doesn't exist. */
+function healthSeries(logs, days = 90) {
+  const cutoff = addDays(todayStr(), -days);
+  const byDay = new Map();
+  for (const l of logs) {
+    if (l.type !== "ai" || typeof l.score !== "number") continue;
+    const day = l.at.slice(0, 10);
+    if (day < cutoff) continue;
+    const at = byDay.get(day) || [];
+    at.push(l.score);
+    byDay.set(day, at);
+  }
+  return [...byDay.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([date, scores]) => ({ date, avg: scores.reduce((s, n) => s + n, 0) / scores.length }));
+}
+
+/* A sparkline, drawn only when there is something to draw.
+
+   Two points is the minimum that can honestly be called a trend; below that
+   the caller shows the score alone. Fixed 0-10 domain rather than fitting to
+   the data, so a wobble between 7.1 and 7.4 looks like the flat line it is
+   instead of a dramatic climb. */
+function healthSparkline(series) {
+  if (series.length < 2) return "";
+  const w = 240, h = 44, pad = 3;
+  const x = i => pad + (i / (series.length - 1)) * (w - pad * 2);
+  const y = v => pad + (1 - v / 10) * (h - pad * 2);
+  const pts = series.map((d, i) => `${x(i).toFixed(1)},${y(d.avg).toFixed(1)}`);
+  const last = series[series.length - 1];
+  return `
+    <svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+      <polygon class="spark-fill" points="${pad},${h - pad} ${pts.join(" ")} ${w - pad},${h - pad}"></polygon>
+      <polyline class="spark-line" points="${pts.join(" ")}"></polyline>
+      <circle class="spark-dot" cx="${x(series.length - 1).toFixed(1)}" cy="${y(last.avg).toFixed(1)}" r="2.8"></circle>
+    </svg>`;
+}
+
 async function viewToday() {
   const plants = await dbAll("plants");
   const hasOutdoor = plants.some(p => !p.archived && isOutdoorPlant(p));
@@ -305,20 +518,57 @@ async function viewToday() {
   const overdue = care.filter(t => t.delta < 0);
   const dueToday = care.filter(t => t.delta === 0);
   const custom = (await dbAll("tasks")).sort((a, b) => a.done - b.done || b.createdAt.localeCompare(a.createdAt));
-  const season = currentSeason();
 
   const greeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 18 ? "Good afternoon" : "Good evening";
   const dateLine = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
+  // Weather sits in the corner of the greeting rather than in a card of its
+  // own: on most days it's a glance, and the advisories below carry anything
+  // that actually needs acting on.
+  const cur = wx ? (wx.current || {}) : null;
+  const wxCorner = hasOutdoor && wx && typeof cur.temperature_2m === "number"
+    ? `<a class="wx-chip" href="#/settings" title="${esc(state.settings.weather.label || "your spot")}">
+         <span class="wx-chip-icon">${wxEmoji(cur.weather_code)}</span>${Math.round(cur.temperature_2m)}°
+       </a>`
+    : "";
+
+  const gh = gardenHealth(plants);
+  const series = healthSeries(await dbAll("logs"));
+  const spark = healthSparkline(series);
+
   let html = `
-    <h1>${greeting}, ${esc(state.settings.activeUser)}</h1>
-    <p class="subtitle">${dateLine}</p>
-    <div class="stat-row">
-      <div class="stat"><div class="num">${plants.filter(p => !p.archived).length}</div><div class="lbl">Plants</div></div>
-      <div class="stat"><div class="num" style="${overdue.length ? 'color:var(--red)' : ''}">${overdue.length}</div><div class="lbl">Overdue</div></div>
-      <div class="stat"><div class="num">${dueToday.length}</div><div class="lbl">Due today</div></div>
-    </div>
-    <div class="tip-card">${SEASONAL_TIPS[season]}</div>`;
+    <div class="today-head">
+      <div>
+        <h1 class="greeting">${greeting}, <b>${esc(state.settings.activeUser)}</b></h1>
+        <p class="subtitle">${dateLine}</p>
+      </div>
+      ${wxCorner}
+    </div>`;
+
+  // One card for how the collection is doing, replacing the three loose stats
+  // and the seasonal message.
+  if (gh.total) {
+    html += `
+      <div class="card flat garden-card">
+        <div class="garden-main">
+          <div class="garden-figure">
+            <div class="garden-score">${gh.avg === null ? "—" : gh.avg.toFixed(1)}</div>
+            <div class="garden-band">${gh.avg === null ? "Not checked yet" : esc(gh.band)}</div>
+          </div>
+          ${spark || ""}
+        </div>
+        <div class="garden-stats">
+          <span><b>${gh.total}</b> plant${gh.total === 1 ? "" : "s"}</span>
+          <span class="${overdue.length ? "is-overdue" : ""}"><b>${overdue.length}</b> overdue</span>
+          <span><b>${dueToday.length}</b> due today</span>
+          ${gh.avg === null
+            ? `<span class="garden-muted">no health checks yet</span>`
+            : gh.scored < gh.total
+              ? `<span class="garden-muted">${gh.scored} of ${gh.total} checked</span>`
+              : ""}
+        </div>
+      </div>`;
+  }
 
   // Porch weather: live conditions + advice for outdoor plants
   if (hasOutdoor) {
@@ -329,20 +579,15 @@ async function viewToday() {
         <a class="btn small secondary" href="#/settings">Set location in Settings</a>
       </div>`;
     } else if (wx) {
-      const cur = wx.current || {};
-      const today0 = wxDay(wx, 0);
-      const deg = "°";
+      // The numbers moved to the chip in the header. Only advisories earn space
+      // here, and only when there is one — "nothing dramatic in the forecast"
+      // was a card's worth of furniture to say nothing.
       const advisories = weatherAdvisories(wx);
-      html += `<div class="card flat wx-card">
-        <div class="wx-now">
-          <span class="wx-temp">${wxEmoji(cur.weather_code)} ${Math.round(cur.temperature_2m)}${deg}</span>
-          <span class="wx-range">${today0 ? `H ${Math.round(today0.tmax)}${deg} · L ${Math.round(today0.tmin)}${deg}${today0.rain >= 1 ? ` · 🌧️ ${today0.rain.toFixed(1)} mm` : ""}` : ""}</span>
-          <span class="wx-loc">📍 ${esc(state.settings.weather.label || "your spot")}</span>
-        </div>
-        ${advisories.length
-          ? advisories.map(a => `<div class="wx-advice">${a.icon} ${esc(a.text)}</div>`).join("")
-          : `<div class="wx-advice">✅ Nothing dramatic in the forecast — regular care applies.</div>`}
-      </div>`;
+      if (advisories.length) {
+        html += `<div class="card flat wx-card">
+          ${advisories.map(a => `<div class="wx-advice">${a.icon} ${esc(a.text)}</div>`).join("")}
+        </div>`;
+      }
     } else {
       html += `<div class="card flat wx-card"><b>Porch weather</b><p class="subtitle" style="margin:6px 0 0">Couldn't reach the weather service — using your normal schedule for now.</p></div>`;
     }
@@ -502,6 +747,26 @@ function potSummary(p) {
   parts.push(esc(p.species || guideEntry(p.speciesKey).name) + (n > 1 ? ` \u00d7${n}` : ""));
   (p.alsoContains || []).forEach(a => parts.push(esc(a.name)));
   return parts.join(" + ");
+}
+
+/* Look a species up, keep it, and hand it to whoever asked.
+
+   The row it was launched from becomes the progress indicator: the lookup
+   takes a few seconds and the list is the only thing the owner is looking at.
+   A failure leaves the search open so the query can be reworded — the typed
+   text is still a perfectly good custom species name if they'd rather move on. */
+async function learnAndPick(query, row, pick) {
+  if (!query) return;
+  row.classList.add("busy");
+  row.innerHTML = `<span class="ac-ask-icon">✦</span><span>Looking up "${esc(query)}"…</span>`;
+  try {
+    const entry = await saveLearnedSpecies(await aiLearnSpecies(query));
+    toast(`Added ${entry.name} to the guide`);
+    pick(entry);
+  } catch (err) {
+    row.classList.remove("busy");
+    row.innerHTML = `<span class="ac-ask-icon">·</span><span>${esc(err.message)}</span>`;
+  }
 }
 
 /* Species rows show a photograph of the plant, not a stand-in glyph. The
@@ -1007,7 +1272,7 @@ async function viewAddEdit(editId = null) {
         <label for="pSpeciesSearch">Species</label>
         <div class="autocomplete">
           <input type="text" id="pSpeciesSearch" maxlength="80" autocomplete="off" autocapitalize="off"
-            placeholder="Search ${PLANT_GUIDE.length - 1}+ species…"
+            placeholder="Search ${allSpecies().length - 1}+ species…"
             value="${esc(speciesValue)}">
           <div class="ac-list" id="speciesResults" hidden></div>
         </div>
@@ -1128,22 +1393,38 @@ async function viewAddEdit(editId = null) {
   sInput.addEventListener("input", () => {
     const q = sInput.value.trim().toLowerCase();
     if (!q) { sList.hidden = true; hint.textContent = ""; return; }
-    const hits = PLANT_GUIDE
+    const hits = allSpecies()
       .filter(g => g.key !== "other")
       .map(g => ({ g, rank: rankSpecies(g, q) }))
       .filter(x => x.rank < 99)
       .sort((a, b) => a.rank - b.rank || a.g.name.localeCompare(b.g.name))
       .slice(0, 8)
       .map(x => x.g);
+    // Nothing in the guide is only a dead end if we leave it there — offer to
+    // go and find out. Also offered alongside weak matches, since searching
+    // "leucadendron" can surface something unrelated that merely contains the
+    // letters rather than the plant in hand.
+    const askRow = aiConfigured()
+      ? `<button type="button" class="ac-item ac-ask" data-ask="${esc(sInput.value.trim())}">
+           <span class="ac-ask-icon">✦</span>
+           <span><b>Look up "${esc(sInput.value.trim())}"</b><br>
+           <span class="ac-ask-sub">Not in the guide — ask Claude for its care, and keep it</span></span>
+         </button>`
+      : "";
     sList.innerHTML = hits.length
-      ? speciesRowsHTML(hits)
-      : `<div class="ac-item ac-none">No match — it'll be saved as a custom species with default care</div>`;
+      ? speciesRowsHTML(hits) + (hits.every(h => rankSpecies(h, q) > 2) ? askRow : "")
+      : (askRow || `<div class="ac-item ac-none">No match — it'll be saved as a custom species with default care</div>`);
     sList.hidden = false;
     if (hits.length) fillSpeciesThumbs(sList, hits);
   });
-  sList.addEventListener("mousedown", e => {
+  sList.addEventListener("mousedown", async e => {
     const item = e.target.closest(".ac-item");
-    if (item && item.dataset.key) { e.preventDefault(); pickSpecies(guideEntry(item.dataset.key)); }
+    if (!item) return;
+    if (item.dataset.key) { e.preventDefault(); pickSpecies(guideEntry(item.dataset.key)); return; }
+    if (item.dataset.ask !== undefined) {
+      e.preventDefault();
+      await learnAndPick(item.dataset.ask, item, pickSpecies);
+    }
   });
   sInput.addEventListener("blur", () => setTimeout(() => { sList.hidden = true; }, 200));
 
@@ -1176,7 +1457,7 @@ async function viewAddEdit(editId = null) {
     const q = alsoInput.value.trim().toLowerCase();
     if (!q) { alsoList.hidden = true; return; }
     const taken = new Set([sKey.value, ...alsoContains.map(a => a.key)]);
-    const hits = PLANT_GUIDE
+    const hits = allSpecies()
       .filter(g => g.key !== "other" && !taken.has(g.key))
       .map(g => ({ g, rank: rankSpecies(g, q) }))
       .filter(x => x.rank < 99)
@@ -1253,7 +1534,7 @@ async function viewAddEdit(editId = null) {
     const plant = editing || { id: uid(), createdAt: new Date().toISOString(), archived: false };
     plant.name = document.getElementById("pName").value.trim();
     const typed = sInput.value.trim();
-    const exact = PLANT_GUIDE.find(g => g.name.toLowerCase() === typed.toLowerCase());
+    const exact = allSpecies().find(g => g.name.toLowerCase() === typed.toLowerCase());
     if (typed && typed === confirmedName.trim()) { /* keep sKey as-is */ }
     else if (exact) sKey.value = exact.key;
     else sKey.value = "other";
@@ -1374,10 +1655,53 @@ async function viewPlant(id) {
   const p = await dbGet("plants", id);
   if (!p) { location.hash = "#/plants"; return; }
   const g = guideEntry(p.speciesKey);
+
+  /* Swiping moves through the collection in the order the Plants tab lists it
+     by default — alphabetical — so "3 of 12" means something when you arrive
+     from that list. Wraps at both ends: on a phone, hitting an invisible wall
+     mid-swipe reads as the gesture having failed. */
+  const siblings = (await dbAll("plants")).filter(x => !x.archived)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const at = siblings.findIndex(x => x.id === id);
+  const go = step => {
+    if (siblings.length < 2 || at === -1) return;
+    location.hash = "#/plant/" + siblings[(at + step + siblings.length) % siblings.length].id;
+  };
+  plantNavGo = go;
+
+  const nav = document.getElementById("plantNav");
+  nav.hidden = siblings.length < 2;
+  document.getElementById("plantPos").textContent = `${at + 1} of ${siblings.length}`;
+  // Assignment rather than addEventListener: these elements outlive the view,
+  // so adding would stack a new handler on every plant you swipe to.
+  document.getElementById("prevPlant").onclick = () => go(-1);
+  document.getElementById("nextPlant").onclick = () => go(1);
+  document.getElementById("backBtn").onclick = () => { location.hash = backHash; };
+  document.getElementById("editBtn").onclick = () => { location.hash = "#/edit/" + id; };
+
+  const view = $view();
+  let sx = 0, sy = 0, tracking = false;
+  view.ontouchstart = e => {
+    tracking = e.touches.length === 1;
+    if (!tracking) return;
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+  };
+  view.ontouchend = e => {
+    if (!tracking) return;
+    tracking = false;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    // Must be a decisive sideways move: anything closer to vertical is the
+    // page being scrolled, and this screen is long enough to scroll a lot.
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    go(dx < 0 ? 1 : -1);
+  };
+
   const photos = (await dbAllByIndex("photos", "plantId", id)).filter(ph => ph.blob).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const logs = (await dbAllByIndex("logs", "plantId", id)).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 30);
   const addedIds = (await dbAll("tasks")).map(t => t.id);
-  const heroURL = photos.length ? URL.createObjectURL(photos[0].blob) : null;
+  const heroURL = photos.length ? viewURL(photos[0].blob) : null;
 
   const wDue = nextDue(p, "water"), fDue = nextDue(p, "fertilize");
   const badge = (due, cls, icon, label) => {
@@ -1420,7 +1744,6 @@ async function viewPlant(id) {
     <div class="action-row">
       <button class="btn small secondary" id="btnRepot">Repotted</button>
       <button class="btn small secondary" id="btnPrune">Pruned</button>
-      <button class="btn small secondary" id="btnEdit">Edit</button>
     </div>
 
     ${(p.alsoContains || []).length ? `
@@ -1463,7 +1786,7 @@ async function viewPlant(id) {
       <label class="btn small secondary" style="cursor:pointer">Add photo<input type="file" id="photoInput" accept="image/*" multiple hidden></label>
     </div>
     ${photos.length ? `<div class="gallery" id="gallery">
-      ${photos.map(ph => `<img src="${URL.createObjectURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}
+      ${photos.map(ph => `<img src="${viewURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}
     </div>` : `<p class="subtitle">No photos yet — take a growth pic!</p>`}
 
     <h2>History</h2>
@@ -1506,7 +1829,6 @@ async function viewPlant(id) {
   document.getElementById("btnFert").addEventListener("click", () => act("fertilize"));
   document.getElementById("btnRepot").addEventListener("click", () => act("repot"));
   document.getElementById("btnPrune").addEventListener("click", () => act("prune"));
-  document.getElementById("btnEdit").addEventListener("click", () => { location.hash = "#/edit/" + id; });
   document.getElementById("btnDelete").addEventListener("click", async () => {
     if (!confirm(`Remove ${p.name} and all its photos/history? This can't be undone.`)) return;
     for (const ph of photos) await removeRecord("photos", ph.id);
@@ -1541,6 +1863,7 @@ async function viewPlant(id) {
 async function openPhotoViewer(photoId, plantId) {
   const ph = await dbGet("photos", photoId);
   if (!ph) return;
+  const url = URL.createObjectURL(ph.blob);
   const div = document.createElement("div");
   div.className = "photo-viewer";
   div.innerHTML = `
@@ -1548,14 +1871,16 @@ async function openPhotoViewer(photoId, plantId) {
       <button class="btn small danger" id="pvDelete">Delete</button>
       <button class="btn small secondary" id="pvClose">Close ✕</button>
     </div>
-    <img src="${URL.createObjectURL(ph.blob)}" alt="">`;
+    <img src="${url}" alt="">`;
   document.body.appendChild(div);
-  div.addEventListener("click", e => { if (e.target === div) div.remove(); });
-  div.querySelector("#pvClose").addEventListener("click", () => div.remove());
+  // This one lives outside #view, so it isn't covered by the per-view release.
+  const close = () => { div.remove(); URL.revokeObjectURL(url); };
+  div.addEventListener("click", e => { if (e.target === div) close(); });
+  div.querySelector("#pvClose").addEventListener("click", close);
   div.querySelector("#pvDelete").addEventListener("click", async () => {
     if (!confirm("Delete this photo?")) return;
     await removeRecord("photos", photoId);
-    div.remove();
+    close();
     render();
   });
 }
@@ -1623,7 +1948,7 @@ async function viewGuide() {
     <h1>Care guide</h1>
     <p class="subtitle">${mine.length
       ? `Care for the ${mine.length} species in your collection${season ? `, and what they need in ${season}` : ""}.`
-      : `Suggested schedules & tips for ${PLANT_GUIDE.length - 1} common houseplants.`}</p>
+      : `Suggested schedules & tips for ${allSpecies().length - 1} common houseplants.`}</p>
     <div class="tip-card">${SEASONAL_TIPS[season]}</div>
 
     ${mine.length ? `
@@ -1636,9 +1961,9 @@ async function viewGuide() {
       <p class="subtitle" style="margin:6px 0 0">Add a plant and its care notes show up at the top of this page.</p></div>`}
 
     <div class="section-head"><h2>All species</h2></div>
-    <div class="search-bar"><input type="text" id="guideSearch" placeholder="Search ${PLANT_GUIDE.length - 1} species…"></div>
+    <div class="search-bar"><input type="text" id="guideSearch" placeholder="Search ${allSpecies().length - 1} species…"></div>
     <div id="guideAll" hidden></div>
-    <button class="btn block secondary" id="guideBrowse">Browse all ${PLANT_GUIDE.length - 1} species</button>`;
+    <button class="btn block secondary" id="guideBrowse">Browse all ${allSpecies().length - 1} species</button>`;
 
   const all = document.getElementById("guideAll");
   const browse = document.getElementById("guideBrowse");
@@ -1649,7 +1974,7 @@ async function viewGuide() {
   // open to check one plant — so the full list is built only when asked for.
   const buildAll = () => {
     if (built) return;
-    all.innerHTML = PLANT_GUIDE.filter(g => g.key !== "other").map(g => card(g, null)).join("");
+    all.innerHTML = allSpecies().filter(g => g.key !== "other").map(g => card(g, null)).join("");
     built = true;
     wireCards(all);
   };
@@ -1752,6 +2077,17 @@ async function viewSettings() {
         <input type="text" id="renameInput" placeholder="Rename active member…" maxlength="30">
         <button class="btn secondary" type="submit">Rename</button>
       </form>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Watering days</h2>
+      <p class="subtitle">Watering collects onto the days you pick, so you're not doing a little every day. On a watering day you do everything that would come due before the next one.</p>
+      <div class="pill-row" id="waterDayPills">
+        ${DAY_NAMES.map((d, i) => `<button class="pill ${waterDays().includes(i) ? "active" : ""}" data-day="${i}">${d}</button>`).join("")}
+      </div>
+      <p class="subtitle" id="waterDayHint"></p>
+      <button class="btn secondary" id="applyRhythm">Move every plant onto this rhythm</button>
+      <p class="subtitle" id="rhythmResult" style="margin-bottom:0"></p>
     </div>
 
     <div class="card">
@@ -2130,6 +2466,40 @@ async function viewSettings() {
       render();
     });
   });
+
+  const dayHint = document.getElementById("waterDayHint");
+  const showDayHint = () => {
+    const days = waterDays();
+    if (!days.length) {
+      dayHint.textContent = "No watering days picked — every plant is listed on its own day.";
+      return;
+    }
+    const gap = maxWaterGap(days);
+    dayHint.textContent = `${days.map(d => DAY_NAMES[d]).join(", ")} — nothing waits more than ${gap} day${gap === 1 ? "" : "s"}. `
+      + `Plants that need water more often than that (outdoor pots in summer, mostly) keep their own schedule.`;
+  };
+  showDayHint();
+  document.getElementById("applyRhythm").addEventListener("click", async e => {
+    const btn = e.target, out = document.getElementById("rhythmResult");
+    btn.disabled = true;
+    const moved = await applyWaterRhythm();
+    btn.disabled = false;
+    out.textContent = moved.length
+      ? `Moved ${moved.length} plant${moved.length === 1 ? "" : "s"} up to every ${moved[0].to} days: `
+        + moved.map(m => `${m.name} (was ${m.from}d)`).join(", ")
+      : "Every plant already fits — nothing needed changing.";
+    if (moved.length) toast(`${moved.length} plant${moved.length === 1 ? "" : "s"} moved onto the rhythm`);
+  });
+  document.querySelectorAll("#waterDayPills .pill").forEach(pill => {
+    pill.addEventListener("click", async () => {
+      const day = Number(pill.dataset.day);
+      const days = waterDays();
+      state.settings.waterDays = days.includes(day) ? days.filter(d => d !== day) : [...days, day].sort();
+      pill.classList.toggle("active");
+      await saveSettings();
+      showDayHint();
+    });
+  });
   document.getElementById("renameForm").addEventListener("submit", async e => {
     e.preventDefault();
     const name = document.getElementById("renameInput").value.trim();
@@ -2246,10 +2616,45 @@ const routes = [
   { re: /^#\/pair\/(.+)$/, fn: m => viewPair(m[1]), tab: "settings" },
 ];
 
+/* Where the back button goes. Following browser history would sometimes leave
+   the app, and swiping from plant to plant would turn "back" into an undo of
+   the swipe — so remember the last screen that wasn't a plant or its edit form
+   and return there. That's Today if you came from a task, the list if you came
+   from the list. */
+let backHash = "#/plants";
+// Set while a plant is on screen, so the arrow keys have something to drive.
+let plantNavGo = null;
+
+/* The plant screen gets a detail-screen top bar: back on the left, Edit on the
+   right, position in the collection between them. None of that belongs on any
+   other screen, and the profile chip belongs to the app rather than to one
+   plant — both at once is clutter on a screen that is mostly photograph. */
+function setTopbarMode(onPlant) {
+  document.querySelector(".brand").hidden = onPlant;
+  document.getElementById("profileBtn").hidden = onPlant;
+  document.getElementById("backBtn").hidden = !onPlant;
+  document.getElementById("editBtn").hidden = !onPlant;
+  document.getElementById("plantNav").hidden = !onPlant;
+  // Claims horizontal gestures from the browser's back/forward navigation —
+  // only here, so every other screen keeps the native behaviour.
+  document.body.classList.toggle("swipe-nav", onPlant);
+  if (!onPlant) {
+    // Leaving the screen takes its gestures and key handling with it.
+    plantNavGo = null;
+    $view().ontouchstart = null;
+    $view().ontouchend = null;
+  }
+}
+
 async function render() {
   const hash = location.hash || "#/today";
   const route = routes.find(r => r.re.test(hash)) || routes[0];
   const m = hash.match(route.re);
+  const onPlant = /^#\/plant\//.test(hash);
+  // The outgoing view's photos are about to be replaced — let go of them.
+  releaseViewURLs();
+  if (!onPlant && !/^#\/edit\//.test(hash)) backHash = hash;
+  setTopbarMode(onPlant);
   document.querySelectorAll(".tab").forEach(t =>
     t.classList.toggle("active", t.dataset.tab === route.tab));
   try {
@@ -2265,7 +2670,18 @@ async function render() {
 // ---------------------------------------------------------------------------
 (async function boot() {
   await loadSettings();
+  await loadLearnedSpecies();
   renderProfileChip();
+
+  // Arrow keys mirror the swipe, for anyone on a laptop. Registered once —
+  // plantNavGo is null unless a plant is on screen.
+  document.addEventListener("keydown", e => {
+    if (!plantNavGo || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (document.querySelector(".sheet-wrap, .photo-viewer")) return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "")) return;
+    if (e.key === "ArrowLeft") { e.preventDefault(); plantNavGo(-1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); plantNavGo(1); }
+  });
   document.getElementById("profileBtn").addEventListener("click", async () => {
     const users = state.settings.users;
     const idx = users.indexOf(state.settings.activeUser);

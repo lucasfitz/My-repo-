@@ -2,6 +2,11 @@
    Monochrome scaffolding on a warm ground; photography carries the color.
    Typeface: San Francisco via -apple-system (SF Pro Display kicks in >20px). */
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* The UA rule for [hidden] is display:none at the lowest possible precedence,
+   so any author rule that sets display — .plant-nav is flex, .icon-btn is grid
+   — silently beats it and the element stays on screen with hidden="true" set.
+   Everything here toggles visibility through the attribute, so it has to win. */
+[hidden] { display: none !important; }
 
 :root {
   --ground: #efede9;
@@ -49,6 +54,11 @@
 }
 
 html { -webkit-text-size-adjust: 100%; }
+/* A sideways drag is the browser's own back/forward gesture. Without this the
+   plant screen's swipe fires, moves to the next plant, and is then overridden
+   by history navigation a moment later — so the swipe appears to throw you out
+   of the plant instead of moving through the collection. */
+html, body { overscroll-behavior-x: contain; }
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
@@ -85,7 +95,28 @@ body {
 }
 .profile-chip:active { transform: scale(.97); }
 
+/* ---------- Detail-screen top bar ---------- */
+.icon-btn {
+  display: grid; place-items: center; width: 38px; height: 38px; flex: none;
+  border: 1px solid var(--hairline); background: var(--surface); color: var(--ink);
+  border-radius: var(--r-pill); cursor: pointer; padding: 0;
+  transition: transform .15s var(--ease), opacity .15s var(--ease);
+}
+.icon-btn:active { transform: scale(.94); }
+.icon-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.plant-nav { display: flex; align-items: center; gap: 6px; }
+.plant-nav .icon-btn { width: 32px; height: 32px; }
+.plant-nav .icon-btn svg { width: 17px; height: 17px; }
+.plant-pos {
+  font-size: 13px; font-weight: 600; color: var(--ink-2);
+  letter-spacing: -0.01em; min-width: 58px; text-align: center;
+}
+
 .view { flex: 1; padding: 4px 20px 116px; }
+/* Vertical scrolling and pinch-zoom stay with the browser; sideways gestures
+   are claimed by the plant screen's swipe rather than by history navigation.
+   Only while a plant is open — everywhere else the browser keeps them. */
+body.swipe-nav .view { touch-action: pan-y pinch-zoom; }
 
 /* ---------- Floating pill nav ---------- */
 .tabbar {
@@ -173,6 +204,56 @@ body {
 .badge.ok { background: var(--grow-bg); color: var(--grow); }
 
 /* ---------- Stats: numbers, not boxes ---------- */
+/* ---------- Today header ---------- */
+.today-head { display: flex; align-items: flex-start; gap: 12px; }
+.today-head > div:first-child { flex: 1; min-width: 0; }
+/* Light by default with the name carrying the weight — the greeting is
+   context, the person is the content. Needs to out-specify `.view h1`, which
+   sets 700 and caps the line at 12ch; this one shares its row with the weather
+   chip and reads better on one or two lines than three. */
+.view h1.greeting {
+  font-weight: 280; font-size: 33px; letter-spacing: -0.03em;
+  line-height: 1.08; max-width: none; margin-top: 4px;
+}
+.view h1.greeting b { font-weight: 660; letter-spacing: -0.035em; }
+/* Weather as a glance in the corner rather than a card of numbers. */
+.wx-chip {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  padding: 6px 12px 6px 9px; border-radius: var(--r-pill);
+  background: var(--surface); border: 1px solid var(--hairline);
+  color: var(--ink-2); font-size: 14px; font-weight: 600;
+  text-decoration: none; font-variant-numeric: tabular-nums; margin-top: 4px;
+}
+.wx-chip-icon { font-size: 15px; }
+
+/* ---------- Garden health ---------- */
+.garden-card { margin: 14px 0 26px; }
+.garden-main { display: flex; align-items: center; gap: 16px; }
+.garden-figure { flex: none; }
+.garden-score {
+  font-size: 38px; font-weight: 700; letter-spacing: -0.05em; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.garden-band { font-size: 13px; color: var(--ink-2); font-weight: 560; margin-top: 4px; }
+.garden-stats {
+  display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 16px;
+  padding-top: 13px; border-top: 1px solid var(--hairline);
+  font-size: 13.5px; color: var(--ink-2); letter-spacing: -0.01em;
+}
+.garden-stats b { color: var(--ink); font-weight: 680; font-variant-numeric: tabular-nums; }
+.garden-stats .is-overdue b { color: var(--alert); }
+.garden-muted { color: var(--ink-3); }
+
+/* The trend line. Fixed 0-10 domain, so a flat stretch reads as flat. */
+.spark { flex: 1; min-width: 0; height: 44px; display: block; overflow: visible; }
+.spark-line {
+  fill: none; stroke: var(--grow); stroke-width: 1.75;
+  stroke-linecap: round; stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.spark-fill { fill: var(--grow); opacity: .10; stroke: none; }
+.spark-dot { fill: var(--grow); }
+
 .stat-row {
   display: flex; margin: 4px 0 32px; padding: 0;
   background: none; border: none;
@@ -252,8 +333,44 @@ input[type=text], input[type=number], input[type=date], input[type=password], se
 input::placeholder, textarea::placeholder { color: var(--ink-3); }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--ink); }
 textarea { min-height: 84px; resize: vertical; }
+
+/* One height for every field, so two of them side by side line up with the
+   pair in the row above instead of stepping. */
+input[type=text], input[type=number], input[type=date], input[type=password], select {
+  min-height: 52px;
+}
+
+/* iOS renders a date input as a button-like control: its own intrinsic width
+   and height, and the value centred. In a two-column row that reads as one
+   wide button spanning the form rather than two fields matching the ones
+   above — which is exactly what it looked like. Strip the native appearance
+   so it sizes from the same box model as every other input. */
+input[type=date] {
+  -webkit-appearance: none;
+  appearance: none;
+  text-align: left;
+  /* Without this the intrinsic width wins and overflows its column, closing
+     up the gap between the two fields. */
+  max-width: 100%;
+}
+/* The value lives in a shadow element that does the centring, so aligning the
+   input alone leaves it centred. */
+input[type=date]::-webkit-date-and-time-value {
+  text-align: left;
+  margin: 0;
+}
+input[type=date]::-webkit-calendar-picker-indicator { opacity: .55; }
 .field-row { display: flex; gap: 12px; }
-.field-row .field { flex: 1; }
+/* min-width: 0 because a flex item defaults to min-width: auto and so refuses
+   to shrink below its content's intrinsic width. A date input's intrinsic
+   width is wide enough that the pair overflowed the screen instead of
+   splitting the row — which is what made them read as one oversized control. */
+.field-row .field { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* A longer label wraps to two lines and would otherwise push its own input
+   below its neighbour's. Letting the label absorb the extra height keeps both
+   inputs on one line — "Fertilize every (days)" wraps on a narrow phone and
+   "Water every (days)" doesn't. */
+.field-row .field > label { flex: 1 0 auto; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -507,6 +624,19 @@ body.sheet-open { overflow: hidden; }
 .ac-item:hover, .ac-item:active { background: var(--surface-sunk); }
 .ac-latin { color: var(--ink-2); font-style: italic; font-size: 13px; }
 .ac-none { color: var(--ink-2); cursor: default; display: block; }
+/* Offer to go and find a species the guide doesn't have. Reads as an action,
+   not as another result — it costs a network call and adds to the guide. */
+.ac-ask {
+  width: 100%; text-align: left; border: none; background: none; font: inherit;
+  color: var(--ink); border-top: 1px solid var(--hairline); line-height: 1.35;
+}
+.ac-ask-icon {
+  flex: none; width: 30px; height: 30px; border-radius: var(--r-pill);
+  display: grid; place-items: center; background: var(--grow-bg); color: var(--grow);
+  font-size: 14px;
+}
+.ac-ask-sub { color: var(--ink-2); font-size: 12.5px; }
+.ac-ask.busy { color: var(--ink-2); cursor: progress; }
 
 
 /* ---------- Week at a glance ---------- */
@@ -520,11 +650,8 @@ body.sheet-open { overflow: hidden; }
 
 /* ---------- Weather ---------- */
 .wx-card { background: var(--surface); }
-.wx-now { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-.wx-temp { font-size: 40px; font-weight: 700; letter-spacing: -0.045em; line-height: 1; font-variant-numeric: tabular-nums; }
-.wx-range { font-size: 13px; color: var(--ink-2); font-weight: 500; }
-.wx-loc { font-size: 11px; color: var(--ink-3); margin-left: auto; letter-spacing: .03em; }
 .wx-advice { font-size: 15px; padding: 11px 0; border-top: 1px solid var(--hairline); letter-spacing: -0.01em; }
+.wx-advice:first-child { border-top: none; padding-top: 2px; }
 .wx-tag { color: var(--cool); font-weight: 600; }
 .wx-tag.hot { color: var(--alert); }
 
@@ -534,6 +661,35 @@ body.sheet-open { overflow: hidden; }
 .ai-head b { font-size: 19px; font-weight: 700; letter-spacing: -0.025em; }
 .ai-trend { font-size: 13px; color: var(--ink-2); font-weight: 500; }
 .ai-summary { font-size: 16px; letter-spacing: -0.01em; margin-bottom: 12px; }
+/* ---------- Collapsible health report ---------- */
+.ai-fold { margin-top: 10px; border-top: 1px solid var(--hairline); }
+.ai-fold-head {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 12px 0 10px; list-style: none; -webkit-tap-highlight-color: transparent;
+}
+/* Safari draws its own triangle unless both of these are cleared. */
+.ai-fold-head::-webkit-details-marker { display: none; }
+.ai-fold-head::marker { content: ""; }
+.ai-fold-title {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--ink-2); font-weight: 600;
+}
+/* The count is what makes a shut section informative — you can tell whether
+   there is anything in it without opening it. */
+.ai-fold-count {
+  min-width: 19px; height: 19px; padding: 0 6px; border-radius: var(--r-pill);
+  background: var(--surface-sunk); color: var(--ink-2);
+  font-size: 11px; font-weight: 700; display: grid; place-items: center;
+}
+.ai-fold-chev { margin-left: auto; display: grid; place-items: center; color: var(--ink-3); }
+.ai-fold-chev svg {
+  width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+  transition: transform .2s var(--ease);
+}
+.ai-fold[open] .ai-fold-chev svg { transform: rotate(180deg); }
+.ai-fold-body { padding-bottom: 12px; }
+
 .ai-section { margin-top: 18px; }
 .ai-section > b { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); margin-bottom: 7px; font-weight: 600; }
 .ai-item { padding: 5px 0; font-size: 15px; letter-spacing: -0.01em; }

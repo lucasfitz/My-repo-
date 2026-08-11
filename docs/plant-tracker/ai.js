@@ -94,6 +94,11 @@ function blobToApiImage(blob, maxDim = 800) {
       canvas.height = Math.round(img.height * scale);
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
       const dataURL = canvas.toDataURL("image/jpeg", 0.8);
+      // Free the pixels before the base64 string is handed back: an assessment
+      // does this three times over, and the string itself is the only part
+      // still needed.
+      releaseCanvas(canvas);
+      img.src = "";
       resolve(dataURL.slice(dataURL.indexOf(",") + 1)); // strip data: prefix → base64
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
@@ -303,26 +308,48 @@ async function assessNow(plantId) {
   finally { releaseAssess(plantId, { rerender: false }); }
 }
 
+/* Waiting their turn. One assessment runs at a time, app-wide.
+
+   These used to be independent per plant, so adding five photos in one go put
+   five vision requests in flight at once — each decoding photos into canvases
+   and holding them as base64 while it uploaded. That is enough memory pressure
+   on a phone for the browser to kill the tab mid-upload, which is exactly what
+   it did. Nobody is waiting on a background check, so a queue costs nothing. */
+const ASSESS_WAIT = [];
+let assessBusy = false;
+
 function autoAssess(plantId) {
   if (!aiConfigured()) return;
   // A photo landing mid-check still deserves a look — remember it and run
   // again once this one lands, rather than dropping it on the floor.
   if (ASSESSING.has(plantId)) { ASSESS_QUEUED.add(plantId); return; }
   ASSESSING.add(plantId);
-  (async () => {
-    try {
-      const health = await aiAssessPlant(plantId);
-      // Only speak up if the plant needs something; a clean bill of health
-      // arriving unprompted is noise.
-      if (health.score <= 5) toast(`Health check: ${health.status} — see the steps`);
-    } catch (err) {
-      console.warn("Sprout AI: automatic health check failed —", err.message);
-    } finally {
-      // Refresh whatever is on screen: the score belongs on the card and the
-      // pill row, not only on the detail page that started the check.
-      releaseAssess(plantId, { rerender: true });
+  ASSESS_WAIT.push(plantId);
+  pumpAssessQueue();
+}
+
+async function pumpAssessQueue() {
+  if (assessBusy) return;
+  assessBusy = true;
+  try {
+    while (ASSESS_WAIT.length) {
+      const plantId = ASSESS_WAIT.shift();
+      try {
+        const health = await aiAssessPlant(plantId);
+        // Only speak up if the plant needs something; a clean bill of health
+        // arriving unprompted is noise.
+        if (health.score <= 5) toast(`Health check: ${health.status} — see the steps`);
+      } catch (err) {
+        console.warn("Sprout AI: automatic health check failed —", err.message);
+      } finally {
+        // Refresh whatever is on screen: the score belongs on the card and the
+        // pill row, not only on the detail page that started the check.
+        releaseAssess(plantId, { rerender: true });
+      }
     }
-  })();
+  } finally {
+    assessBusy = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +422,66 @@ async function aiIdentifySpecies(blob) {
   });
   result.candidates = (result.candidates || []).slice(0, MAX_CANDIDATES);
   return result;
+}
+
+/* ---------------------------------------------------------------------------
+   Learning a species the guide doesn't have
+
+   A hand-written list is never finished — every gap costs the owner a dead end
+   at exactly the moment they're trying to add a plant. Rather than grow the
+   list forever, the app asks for the care profile of whatever was typed and
+   keeps it. Learned species are stored like any other record and sync to the
+   other phone, so each one is learned once for the household.
+
+   No numeric bounds in the schema: structured outputs reject them, so the
+   ranges live in the descriptions and are clamped on arrival.
+   --------------------------------------------------------------------------- */
+const SPECIES_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["found", "name", "latin_name", "water_every_days", "fertilize_every_days", "light", "tips", "note"],
+  properties: {
+    found: { type: "boolean", description: "True if this is a real, identifiable plant you can give care advice for. False for gibberish or something that isn't a plant." },
+    name: { type: "string", description: "Common name, title case. Fall back to the botanical name if there is no common one." },
+    latin_name: { type: "string", description: "Botanical name. Genus alone is fine when the query names only a genus." },
+    water_every_days: { type: "integer", description: "Typical days between waterings in the growing season, 1-30. Err on the dry side for anything succulent or Mediterranean." },
+    fertilize_every_days: { type: "integer", description: "Typical days between feeds in the growing season, 0-120. Use 0 for plants that are harmed by feeding — carnivores, legumes, Proteaceae, and anything that wants lean soil." },
+    light: { type: "string", description: "Short light requirement, phrased like 'Bright indirect light' or 'Full direct sun'." },
+    tips: { type: "string", description: "Two or three sentences of care advice specific to this plant: the mistake people actually make with it, and how to tell it is unhappy. No generic filler." },
+    note: { type: "string", description: "Empty if found. Otherwise a short line explaining why no advice could be given." },
+  },
+};
+
+async function aiLearnSpecies(query) {
+  const result = await askClaude({
+    system:
+      "You supply care data for a plant-care app whose built-in guide didn't have the plant the owner typed. " +
+      "Give the care a knowledgeable grower would give, not a hedged average: intervals are a starting schedule the " +
+      "owner will adjust, so commit to a number.\n\n" +
+      "Be careful with plants that are harmed by ordinary care — Proteaceae and Australian natives are killed by " +
+      "phosphorus, carnivorous plants by fertilizer and tap water, succulents by a weekly watering can. Where that " +
+      "applies, say so in the tips rather than leaving it to be discovered.\n\n" +
+      "If the query names a genus rather than a species, answer for the genus as commonly grown. If it isn't a plant " +
+      "or you can't tell what was meant, set found to false rather than guessing.",
+    messages: [{ role: "user", content: `Care profile for: ${query}` }],
+    schema: SPECIES_SCHEMA,
+    effort: "low",
+    maxTokens: 3000,
+  });
+  if (!result.found) throw new Error(result.note || `No care data found for "${query}".`);
+
+  // The model is asked for sane ranges but nothing enforces them on the wire.
+  const clamp = (n, lo, hi, fallback) =>
+    Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : fallback;
+  return {
+    name: (result.name || query).trim(),
+    latin: (result.latin_name || "").trim(),
+    emoji: "🪴",
+    waterDays: clamp(result.water_every_days, 1, 60, 7),
+    fertDays: clamp(result.fertilize_every_days, 0, 180, 30),
+    light: (result.light || "Check the nursery tag").trim(),
+    tips: (result.tips || "").trim(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +571,8 @@ function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
   const status = a.status || "unknown";
   const trendIcon = { improving: "↗", stable: "→", declining: "↘", unknown: "" }[a.trend] || "";
   const actions = a.actions || [];
+  const issues = a.issues || [];
+  const observations = a.observations || [];
   const steps = actions.map((act, i) => {
     const taskId = actionTaskId(plantId, a.at || "", i);
     const added = addedIds.includes(taskId);
@@ -519,18 +608,46 @@ function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
         ${a.at ? `<span class="ai-when">${fmtDate(a.at.slice(0, 10))}</span>` : ""}
       </div>
       <p class="ai-summary">${esc(a.summary)}</p>
-      ${(a.observations || []).length ? `<div class="ai-section"><b>Observed</b>${a.observations.map(o => `<div class="ai-item">· ${esc(o)}</div>`).join("")}</div>` : ""}
-      ${(a.issues || []).length ? `<div class="ai-section"><b>Issues</b>${a.issues.map(i =>
-        `<div class="ai-item ai-issue-${i.severity}">· <b>${esc(i.issue)}</b> — ${esc(i.action)}</div>`).join("")}</div>` : ""}
-      ${steps ? `
-        <div class="ai-section">
-          <div class="act-head">
-            <b>What to do</b>
-            <button class="btn small secondary" type="button" id="addAllSteps">Add all to checklist</button>
-          </div>
-          ${steps}
-        </div>` : ""}
+      ${section("What to do", steps, {
+        open: true,
+        count: actions.length,
+        extra: `<button class="btn small secondary" type="button" id="addAllSteps">Add all to checklist</button>`,
+      })}
+      ${section("Issues", issues.map(i =>
+        `<div class="ai-item ai-issue-${esc(i.severity)}">· <b>${esc(i.issue)}</b> — ${esc(i.action)}</div>`).join(""),
+        { count: issues.length })}
+      ${section("Observed", observations.map(o => `<div class="ai-item">· ${esc(o)}</div>`).join(""),
+        { count: observations.length })}
     </div>`;
+}
+
+/* One collapsible block of the health report.
+
+   The report had grown to a wall of text under a photo — a score, a summary,
+   observations, issues and steps all expanded at once, so the thing you can
+   act on was somewhere in the middle of it. Each part now folds, with the
+   count on the header so a collapsed section still tells you whether it is
+   worth opening.
+
+   Only "What to do" starts open — it is the part you act on. Issues and
+   observations are why, not what, and both start shut: the count on the header
+   is enough to decide whether to look.
+
+   <details> rather than a click handler: it keeps the disclosure semantics,
+   works before any JS runs, and survives the re-render after a step is added. */
+function section(title, body, { open = false, count = 0, extra = "" } = {}) {
+  if (!body) return "";
+  return `
+    <details class="ai-fold"${open ? " open" : ""}>
+      <summary class="ai-fold-head">
+        <span class="ai-fold-title">${esc(title)}</span>
+        ${count ? `<span class="ai-fold-count">${count}</span>` : ""}
+        <span class="ai-fold-chev" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></svg>
+        </span>
+      </summary>
+      <div class="ai-fold-body">${extra ? `<div class="act-head">${extra}</div>` : ""}${body}</div>
+    </details>`;
 }
 
 function renderGardenInsights(g) {
