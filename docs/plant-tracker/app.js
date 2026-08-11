@@ -67,11 +67,46 @@ async function removeRecord(store, id) {
 // ---------------------------------------------------------------------------
 // Settings / household profiles
 // ---------------------------------------------------------------------------
-const state = { settings: { users: ["Lucas", "Partner"], activeUser: "Lucas", lastNotified: "", rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office", "Porch"] } };
+const state = { settings: { users: ["Lucas", "Kelly"], activeUser: "Lucas", lastNotified: "", rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office", "Porch"] } };
 
 async function loadSettings() {
   const row = await dbGet("settings", "main");
   if (row) state.settings = Object.assign(state.settings, row.value);
+  await migrateSettings();
+}
+
+/* Saved settings shadow the defaults, so changing a default alone never
+   reaches a device that has already stored the old value. Renames need a
+   migration, and they need to be idempotent — this runs on every load. */
+async function migrateSettings() {
+  let changed = false;
+  const RENAMES = { Partner: "Kelly" };
+  for (const [from, to] of Object.entries(RENAMES)) {
+    const i = (state.settings.users || []).indexOf(from);
+    // Skip if the new name is already there, so a manual rename isn't undone.
+    if (i !== -1 && !state.settings.users.includes(to)) {
+      state.settings.users[i] = to;
+      if (state.settings.activeUser === from) state.settings.activeUser = to;
+      changed = true;
+    }
+  }
+  if (changed) {
+    await saveSettings();
+    await renameInHistory(RENAMES);
+  }
+}
+
+// History carries the name it was written with; leaving it behind would mean
+// "watered by Partner" under a person called Kelly.
+async function renameInHistory(renames) {
+  for (const store of ["logs", "tasks"]) {
+    for (const rec of await dbAll(store)) {
+      const to = renames[rec.by];
+      if (!to) continue;
+      rec.by = to;
+      await saveRecord(store, rec);
+    }
+  }
 }
 async function saveSettings() {
   await dbPut("settings", { key: "main", value: state.settings });
@@ -415,13 +450,71 @@ async function viewToday() {
   });
 }
 
+// What's in the pot, in words: "Monstera x3", "Monstera + Pothos".
+function potSummary(p) {
+  const parts = [];
+  const n = p.quantity || 1;
+  parts.push(esc(p.species || guideEntry(p.speciesKey).name) + (n > 1 ? ` \u00d7${n}` : ""));
+  (p.alsoContains || []).forEach(a => parts.push(esc(a.name)));
+  return parts.join(" + ");
+}
+
+/* Species rows show a photograph of the plant, not a stand-in glyph. The
+   image arrives after the row does, so each row renders a slot and gets
+   filled as lookups land. Requests are aborted when the query moves on, and
+   results are cached per-device, so typing doesn't re-fetch what it just saw. */
+let speciesThumbAbort = null;
+function speciesRowsHTML(hits) {
+  return hits.map(g => `
+    <div class="ac-item" data-key="${g.key}">
+      <span class="ac-thumb" data-thumb-key="${g.key}"></span>
+      <span class="ac-text"><span class="ac-name">${esc(g.name)}</span>
+      <span class="ac-latin">${esc(g.latin)}</span></span>
+    </div>`).join("");
+}
+
+function fillSpeciesThumbs(container, hits) {
+  if (speciesThumbAbort) speciesThumbAbort.abort();
+  speciesThumbAbort = new AbortController();
+  const signal = speciesThumbAbort.signal;
+  hits.forEach(async g => {
+    try {
+      const url = await speciesThumb(g.latin, g.name, signal);
+      if (signal.aborted) return;
+      const slot = container.querySelector(`[data-thumb-key="${g.key}"]`);
+      if (slot && url) {
+        // Decode before inserting, so a photo that fails to load leaves the
+        // neutral slot instead of a broken-image icon. Deliberately not
+        // loading="lazy": that defers until the element is in the viewport,
+        // and this one is off-document until it has loaded — which would
+        // mean it never loads at all.
+        const img = new Image();
+        img.alt = "";
+        img.onload = () => {
+          if (!slot.isConnected) return;
+          slot.innerHTML = "";
+          slot.appendChild(img);
+          slot.classList.add("has-img");
+        };
+        img.src = url;
+      }
+    } catch { /* aborted or offline — the slot stays neutral */ }
+  });
+}
+
 // ----- Plants list -----
 async function viewPlants() {
   const plants = (await dbAll("plants")).filter(p => !p.archived)
     .sort((a, b) => a.name.localeCompare(b.name));
+  const groupBy = state.settings.plantsGroupBy || "name";
 
   let html = `<h1>Our plants</h1><p class="subtitle">${plants.length} plant${plants.length === 1 ? "" : "s"} in the family</p>
-    <div class="search-bar"><input type="text" id="plantSearch" placeholder="Search plants…"></div>`;
+    <div class="search-bar"><input type="text" id="plantSearch" placeholder="Search plants…"></div>
+    <div class="pill-row" id="groupBy">
+      <button class="pill ${groupBy === "name" ? "active" : ""}" data-group="name">All</button>
+      <button class="pill ${groupBy === "room" ? "active" : ""}" data-group="room">By room</button>
+      <button class="pill ${groupBy === "due" ? "active" : ""}" data-group="due">Needs water</button>
+    </div>`;
 
   if (!plants.length) {
     html += `<div class="empty"><div class="big">🪴</div><p>Nothing here yet.<br>Tap <b>Add</b> to start your collection.</p></div>`;
@@ -442,19 +535,54 @@ async function viewPlants() {
         ${photo ? `<img src="${photo}" alt="${esc(p.name)}">` : `<div class="no-photo">${plantEmoji(p)}</div>`}
         <div class="plant-card-body">
           <div class="plant-card-name">${esc(p.name)}</div>
-          <div class="plant-card-sub">${esc(p.species || "")}${p.location ? " · " + esc(p.location) : ""}</div>
+          <div class="plant-card-sub">${potSummary(p)}${p.location ? " · " + esc(p.location) : ""}</div>
           <div class="plant-card-chips">${chip}${healthChip(p.health)}</div>
         </div>
       </a>`;
   }));
 
-  html += `<div class="plant-grid" id="plantGrid">${cards.join("")}</div>`;
+  if (groupBy === "room") {
+    // Ungrouped plants go last under their own heading rather than vanishing.
+    const byRoom = {};
+    plants.forEach((p, i) => {
+      const room = (p.location || "").trim() || "No room set";
+      (byRoom[room] = byRoom[room] || []).push(cards[i]);
+    });
+    const rooms = Object.keys(byRoom).sort((a, b) =>
+      a === "No room set" ? 1 : b === "No room set" ? -1 : a.localeCompare(b));
+    html += rooms.map(room => `
+      <div class="plant-group" data-room="${esc(room.toLowerCase())}">
+        <div class="group-head"><h2>${esc(room)}</h2><span class="group-count">${byRoom[room].length}</span></div>
+        <div class="plant-grid">${byRoom[room].join("")}</div>
+      </div>`).join("");
+  } else if (groupBy === "due") {
+    const order = plants.map((p, i) => {
+      const due = nextDue(p, "water");
+      return { card: cards[i], delta: due ? daysBetween(todayStr(), due) : Infinity };
+    }).sort((a, b) => a.delta - b.delta);
+    html += `<div class="plant-grid" id="plantGrid">${order.map(o => o.card).join("")}</div>`;
+  } else {
+    html += `<div class="plant-grid" id="plantGrid">${cards.join("")}</div>`;
+  }
   $view().innerHTML = html;
+
+  document.getElementById("groupBy").addEventListener("click", async e => {
+    const btn = e.target.closest("[data-group]");
+    if (!btn) return;
+    state.settings.plantsGroupBy = btn.dataset.group;
+    await saveSettings();
+    render();
+  });
 
   document.getElementById("plantSearch").addEventListener("input", e => {
     const q = e.target.value.trim().toLowerCase();
-    document.querySelectorAll("#plantGrid .plant-card").forEach(c => {
+    $view().querySelectorAll(".plant-card").forEach(c => {
       c.style.display = !q || c.dataset.name.includes(q) ? "" : "none";
+    });
+    // Hide a room heading once everything under it is filtered out.
+    $view().querySelectorAll(".plant-group").forEach(g => {
+      const anyVisible = [...g.querySelectorAll(".plant-card")].some(c => c.style.display !== "none");
+      g.style.display = anyVisible ? "" : "none";
     });
   });
 }
@@ -463,6 +591,7 @@ async function viewPlants() {
 // A bottom drawer. Opens over whatever you were doing, dismisses by tapping
 // away or pressing Esc — `onDismiss` fires only for those, not for close().
 function openSheet({ title, sub = "", onDismiss = null }) {
+  document.querySelectorAll(".sheet-wrap").forEach(old => old.remove());
   const el = document.createElement("div");
   el.className = "sheet-wrap";
   el.innerHTML = `
@@ -518,7 +647,13 @@ const CONF_CLASS = { high: "ok", medium: "fertilize", low: "" };
 // fill in the details. Editing goes straight to the form.
 async function viewAddEdit(editId = null) {
   const editing = editId ? await dbGet("plants", editId) : null;
-  let photo = null;  // resized blob, saved with the plant on submit
+  let photo = null;      // resized blob, saved with the plant on submit
+  let queue = [];        // photos still waiting their turn
+  let batchTotal = 0;    // 0 when this isn't a batch
+  let batchDone = 0;
+
+  // Shown on every screen of the flow so you always know where you are in the pile.
+  const batchLabel = () => batchTotal > 1 ? `Plant ${batchDone + 1} of ${batchTotal}` : "";
 
   if (!editing) { renderCapture(); return; }
   await renderForm();
@@ -531,13 +666,13 @@ async function viewAddEdit(editId = null) {
         ? "Start with a photo. Sprout will work out what it is — you confirm."
         : "Start with a photo, then pick the species yourself."}</p>
       <label class="photo-drop" id="photoDrop">
-        <input type="file" id="pPhoto" accept="image/*" hidden>
+        <input type="file" id="pPhoto" accept="image/*" multiple hidden>
         <div class="photo-drop-inner" id="photoDropInner">
           <svg viewBox="0 0 24 24" aria-hidden="true" class="photo-drop-icon">
             <rect x="3" y="6" width="18" height="14" rx="3"/><circle cx="12" cy="13" r="3.4"/><path d="M8.5 6l1.4-2.2h4.2L15.5 6"/>
           </svg>
           <span class="photo-drop-title">Take a photo</span>
-          <span class="photo-drop-sub">Or choose one from your library</span>
+          <span class="photo-drop-sub">Or pick several from your library at once</span>
         </div>
       </label>
       <button class="btn block secondary" id="skipPhoto" style="margin-top:14px">Add without a photo</button>`;
@@ -546,21 +681,52 @@ async function viewAddEdit(editId = null) {
   }
 
   async function onPhotoPicked(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    try {
-      photo = await resizeImage(file);
-    } catch {
-      toast("Couldn't read that image — try another");
-      return;
-    }
+    const files = [...e.target.files];
+    if (!files.length) return;
     const inner = document.getElementById("photoDropInner");
-    if (inner) {  // still on step 1: show the photo while we think about it
+    if (inner && files.length > 1) {
+      document.getElementById("photoDrop").classList.add("has-photo");
+      inner.innerHTML = `<div class="photo-drop-inner"><span class="photo-drop-title">Preparing ${files.length} photos…</span></div>`;
+    }
+    // Resize up front so the queue holds ready-to-save blobs, not File handles
+    // that a phone may drop while the flow is in progress.
+    const blobs = [];
+    for (const f of files) {
+      try { blobs.push(await resizeImage(f)); } catch { /* skip anything unreadable */ }
+    }
+    if (!blobs.length) { toast("Couldn't read those images — try others"); return; }
+    if (blobs.length < files.length) toast(`Skipped ${files.length - blobs.length} unreadable photo(s)`);
+
+    photo = blobs[0];
+    queue = blobs.slice(1);
+    batchTotal = blobs.length;
+    batchDone = 0;
+    if (inner && batchTotal === 1) {
       document.getElementById("photoDrop").classList.add("has-photo");
       inner.innerHTML = `<img src="${URL.createObjectURL(photo)}" alt="">`;
     }
     if (!aiConfigured()) { await renderForm(); return; }
     await identify();
+  }
+
+  /* After a save, move to the next photo instead of leaving the flow. Returns
+     false when the pile is empty and the caller should navigate away. */
+  async function advanceBatch() {
+    if (!queue.length) return false;
+    photo = queue.shift();
+    batchDone++;
+    if (aiConfigured()) await identify();
+    else await renderForm();
+    return true;
+  }
+
+  // Drop the current photo without saving anything for it.
+  async function skipPhoto() {
+    if (!queue.length) { location.hash = "#/plants"; return; }
+    batchTotal--;
+    photo = queue.shift();
+    if (aiConfigured()) await identify();
+    else await renderForm();
   }
 
   // --- Step 2: the shortlist, in a drawer ---
@@ -570,7 +736,7 @@ async function viewAddEdit(editId = null) {
   async function identify(apply = seed => renderForm(seed)) {
     const sheet = openSheet({
       title: "Identifying…",
-      sub: "Reading leaf shape, habit, and setting.",
+      sub: [batchLabel(), "Reading leaf shape, habit, and setting."].filter(Boolean).join(" · "),
       onDismiss: () => apply({}),
     });
     sheet.body.innerHTML = `<div class="cand-row"><div class="cand skeleton"></div></div>`.repeat(3);
@@ -586,7 +752,7 @@ async function viewAddEdit(editId = null) {
     }
 
     if (!id.is_plant || !id.candidates.length) {
-      sheet.setHead("That doesn't look like a plant", id.note || "");
+      sheet.setHead("That doesn't look like a plant", [batchLabel(), id.note].filter(Boolean).join(" · "));
       sheet.body.innerHTML = "";
       sheet.foot.innerHTML = `<button class="btn block" id="candManual">Add it anyway</button>`;
       document.getElementById("candManual").addEventListener("click", () => {
@@ -604,15 +770,15 @@ async function viewAddEdit(editId = null) {
     const count = ["", "one", "two", "three", "four", "five"][cands.length] || cands.length;
     sheet.setHead(
       many ? "Which one is it?" : "Is this your plant?",
-      many
+      [batchLabel(), many
         ? `It could be ${count} things — closest first. Tap one to compare against example photos.`
-        : (id.note || "Tap it to compare against example photos.")
+        : (id.note || "Tap it to compare against example photos.")].filter(Boolean).join(" · ")
     );
 
     sheet.body.innerHTML = cands.map((c, i) => `
       <div class="cand-row">
         <button type="button" class="cand" data-i="${i}" aria-pressed="false">
-          <span class="cand-thumb" data-thumb="${i}">${esc(guideEntry(c.species_key).emoji || "🌿")}</span>
+          <span class="cand-thumb" data-thumb="${i}"></span>
           <span class="cand-main">
             <span class="cand-name">${esc(c.common_name)}</span>
             ${c.latin_name ? `<span class="cand-latin">${esc(c.latin_name)}</span>` : ""}
@@ -625,7 +791,8 @@ async function viewAddEdit(editId = null) {
 
     sheet.foot.innerHTML = `
       <button class="btn block" id="candUse">Use this</button>
-      <button class="btn block secondary" id="candNone" style="margin-top:8px">None of these — I'll search</button>`;
+      <button class="btn block secondary" id="candNone" style="margin-top:8px">None of these — I'll search</button>
+      ${batchTotal > 1 ? `<button class="btn block secondary" id="candSkip" style="margin-top:8px">Skip this photo</button>` : ""}`;
 
     const rows = [...sheet.body.querySelectorAll(".cand")];
     const useBtn = document.getElementById("candUse");
@@ -666,7 +833,7 @@ async function viewAddEdit(editId = null) {
         ? `<div class="cand-ex-label">Example photos of ${esc(c.latin_name || c.common_name)}</div>
            <div class="cand-ex-strip">${examples[i]
              .map(u => `<img src="${esc(u)}" alt="Example ${esc(c.common_name)}" loading="lazy">`).join("")}</div>`
-        : `<div class="cand-ex-label">No example photos available — check the name against the guide.</div>`;
+        : `<div class="cand-ex-label">No photos found for this one — check the botanical name against the guide.</div>`;
     }
 
     rows.forEach((r, i) => r.addEventListener("click", () => select(i)));
@@ -683,6 +850,8 @@ async function viewAddEdit(editId = null) {
       sheet.close();
       apply({ outdoor: id.looks_outdoor });
     });
+    const skipBtn = document.getElementById("candSkip");
+    if (skipBtn) skipBtn.addEventListener("click", () => { sheet.close(); skipPhoto(); });
   }
 
   // --- Step 3: the details ---
@@ -700,6 +869,7 @@ async function viewAddEdit(editId = null) {
 
   $view().innerHTML = `
     <h1>${editing ? "Edit " + esc(editing.name) : "Confirm the details"}</h1>
+    ${batchLabel() ? `<div class="batch-bar"><span>${batchLabel()}</span><div class="batch-track"><i style="width:${Math.round(batchDone / batchTotal * 100)}%"></i></div></div>` : ""}
     <p class="subtitle">${editing
       ? "Update details or schedules."
       : seed.name
@@ -733,6 +903,20 @@ async function viewAddEdit(editId = null) {
         </div>
         <input type="hidden" id="pSpeciesKey" value="${esc(speciesKeyValue)}">
         <div class="hint" id="speciesHint"></div>
+      </div>
+      <div class="field">
+        <label for="pQuantity">How many in this pot?</label>
+        <input type="number" id="pQuantity" min="1" max="99" value="${editing?.quantity || 1}">
+        <div class="hint">Several cuttings of the same plant sharing one pot count as one entry.</div>
+      </div>
+      <div class="field">
+        <label for="pAlsoSearch">Anything else in the same pot?</label>
+        <div class="autocomplete">
+          <input type="text" id="pAlsoSearch" maxlength="80" autocomplete="off" autocapitalize="off" placeholder="Add another species…">
+          <div class="ac-list" id="alsoResults" hidden></div>
+        </div>
+        <div class="pill-row" id="alsoChips" style="margin:10px 0 0"></div>
+        <div class="hint" id="alsoHint"></div>
       </div>
       <div class="field">
         <label for="pRoom">Room</label>
@@ -776,8 +960,9 @@ async function viewAddEdit(editId = null) {
         <label for="pNotes">Notes</label>
         <textarea id="pNotes" maxlength="1000" placeholder="Quirks, where it came from, repotting history…">${esc(editing?.notes || "")}</textarea>
       </div>
-      <button class="btn block" type="submit">${editing ? "Save changes" : "Add plant"}</button>
+      <button class="btn block" type="submit">${editing ? "Save changes" : (queue.length ? "Add and go to the next photo" : "Add plant")}</button>
       ${editing ? `<button class="btn block secondary" type="button" id="cancelEdit" style="margin-top:8px">Cancel</button>` : ""}
+      ${!editing && batchTotal > 1 ? `<button class="btn block secondary" type="button" id="skipPhotoBtn" style="margin-top:8px">Skip this photo</button>` : ""}
     </form>`;
 
   const sInput = document.getElementById("pSpeciesSearch");
@@ -816,21 +1001,104 @@ async function viewAddEdit(editId = null) {
     showHint();
   };
 
+  // With a few hundred species, filtering alone puts "Mini Monstera" above
+  // "Monstera". Rank by how well the match starts, not just whether it matches.
+  const rankSpecies = (g, q) => {
+    const name = g.name.toLowerCase(), latin = g.latin.toLowerCase();
+    if (name === q) return 0;
+    if (name.startsWith(q)) return 1;
+    if (latin.startsWith(q)) return 2;
+    // A match at a word boundary beats one buried mid-word.
+    if (new RegExp("\\b" + q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(name)) return 3;
+    if (name.includes(q)) return 4;
+    if (latin.includes(q)) return 5;
+    return 99;
+  };
+
   sInput.addEventListener("input", () => {
     const q = sInput.value.trim().toLowerCase();
     if (!q) { sList.hidden = true; hint.textContent = ""; return; }
-    const hits = PLANT_GUIDE.filter(g => g.key !== "other" &&
-      (g.name.toLowerCase().includes(q) || g.latin.toLowerCase().includes(q))).slice(0, 12);
+    const hits = PLANT_GUIDE
+      .filter(g => g.key !== "other")
+      .map(g => ({ g, rank: rankSpecies(g, q) }))
+      .filter(x => x.rank < 99)
+      .sort((a, b) => a.rank - b.rank || a.g.name.localeCompare(b.g.name))
+      .slice(0, 8)
+      .map(x => x.g);
     sList.innerHTML = hits.length
-      ? hits.map(g => `<div class="ac-item" data-key="${g.key}">${g.emoji} ${esc(g.name)} <span class="ac-latin">${esc(g.latin)}</span></div>`).join("")
+      ? speciesRowsHTML(hits)
       : `<div class="ac-item ac-none">No match — it'll be saved as a custom species with default care</div>`;
     sList.hidden = false;
+    if (hits.length) fillSpeciesThumbs(sList, hits);
   });
   sList.addEventListener("mousedown", e => {
     const item = e.target.closest(".ac-item");
     if (item && item.dataset.key) { e.preventDefault(); pickSpecies(guideEntry(item.dataset.key)); }
   });
   sInput.addEventListener("blur", () => setTimeout(() => { sList.hidden = true; }, 200));
+
+  // --- Everything else sharing the pot ---
+  const alsoInput = document.getElementById("pAlsoSearch");
+  const alsoList = document.getElementById("alsoResults");
+  const alsoChips = document.getElementById("alsoChips");
+  const alsoHint = document.getElementById("alsoHint");
+  let alsoContains = (editing?.alsoContains || []).slice();
+
+  const renderAlso = () => {
+    alsoChips.innerHTML = alsoContains.map((a, i) =>
+      `<button type="button" class="pill active" data-drop="${i}">${esc(guideEntry(a.key).emoji)} ${esc(a.name)} ✕</button>`).join("");
+    if (!alsoContains.length) { alsoHint.textContent = ""; return; }
+    // Everything in one pot gets watered together, so the schedule has to suit
+    // whichever occupant dries out first.
+    const all = [sKey.value, ...alsoContains.map(a => a.key)].map(guideEntry).filter(g => g.waterDays);
+    const thirstiest = all.reduce((m, g) => (g.waterDays < m.waterDays ? g : m), all[0]);
+    alsoHint.textContent = `Sharing a pot means sharing a watering can — the schedule below follows ${thirstiest.name}, the thirstiest of them.`;
+  };
+
+  const applyPotSchedule = () => {
+    if (!alsoContains.length) return;
+    const all = [sKey.value, ...alsoContains.map(a => a.key)].map(guideEntry).filter(g => g.waterDays);
+    if (!all.length) return;
+    document.getElementById("pWater").value = Math.min(...all.map(g => g.waterDays));
+  };
+
+  alsoInput.addEventListener("input", () => {
+    const q = alsoInput.value.trim().toLowerCase();
+    if (!q) { alsoList.hidden = true; return; }
+    const taken = new Set([sKey.value, ...alsoContains.map(a => a.key)]);
+    const hits = PLANT_GUIDE
+      .filter(g => g.key !== "other" && !taken.has(g.key))
+      .map(g => ({ g, rank: rankSpecies(g, q) }))
+      .filter(x => x.rank < 99)
+      .sort((a, b) => a.rank - b.rank || a.g.name.localeCompare(b.g.name))
+      .slice(0, 8)
+      .map(x => x.g);
+    alsoList.innerHTML = hits.length
+      ? speciesRowsHTML(hits)
+      : `<div class="ac-item ac-none">No match</div>`;
+    alsoList.hidden = false;
+    if (hits.length) fillSpeciesThumbs(alsoList, hits);
+  });
+  alsoList.addEventListener("mousedown", e => {
+    const item = e.target.closest(".ac-item");
+    if (!item || !item.dataset.key) return;
+    e.preventDefault();
+    const g = guideEntry(item.dataset.key);
+    alsoContains.push({ key: g.key, name: g.name });
+    alsoInput.value = "";
+    alsoList.hidden = true;
+    renderAlso();
+    applyPotSchedule();
+  });
+  alsoInput.addEventListener("blur", () => setTimeout(() => { alsoList.hidden = true; }, 200));
+  alsoChips.addEventListener("click", e => {
+    const btn = e.target.closest("[data-drop]");
+    if (!btn) return;
+    alsoContains.splice(Number(btn.dataset.drop), 1);
+    renderAlso();
+    applyPotSchedule();
+  });
+  renderAlso();
 
   const roomSel = document.getElementById("pRoom");
   const roomNew = document.getElementById("pRoomNew");
@@ -881,6 +1149,8 @@ async function viewAddEdit(editId = null) {
     else sKey.value = "other";
     plant.speciesKey = sKey.value;
     plant.species = typed || guideEntry(sKey.value).name;
+    plant.quantity = Math.max(1, parseInt(document.getElementById("pQuantity").value, 10) || 1);
+    plant.alsoContains = alsoContains;
     const newRoom = roomSel.value === "__new__" ? roomNew.value.trim() : "";
     plant.location = newRoom || (roomSel.value === "__new__" ? "" : roomSel.value);
     if (plant.location && !(state.settings.rooms || []).includes(plant.location)) {
@@ -900,11 +1170,18 @@ async function viewAddEdit(editId = null) {
       }
       await saveRecord("logs", { id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: state.settings.activeUser, note: "Added to the collection" });
     }
-    toast(editing ? "Saved" : `Added ${plant.name}`);
+    if (!editing && queue.length) {
+      toast(`Added ${plant.name} — ${batchDone + 1} of ${batchTotal}`);
+      await advanceBatch();
+      return;
+    }
+    toast(editing ? "Saved" : (batchTotal > 1 ? `Added ${plant.name} — all ${batchTotal} done` : `Added ${plant.name}`));
     location.hash = "#/plant/" + plant.id;
   });
   const cancel = document.getElementById("cancelEdit");
   if (cancel) cancel.addEventListener("click", () => { location.hash = "#/plant/" + editId; });
+  const skipBtn2 = document.getElementById("skipPhotoBtn");
+  if (skipBtn2) skipBtn2.addEventListener("click", () => skipPhoto());
   }
 }
 
@@ -1016,7 +1293,7 @@ async function viewPlant(id) {
       </button>
     </div>
     <h1>${esc(p.name)}</h1>
-    <p class="subtitle">${esc(p.species || g.name)}${p.location ? " · " + esc(p.location) : ""}</p>
+    <p class="subtitle">${potSummary(p)}${p.location ? " · " + esc(p.location) : ""}</p>
     <div class="pill-row">
       ${badge(wDue, "water", "💧", "water")}
       ${badge(fDue, "fertilize", "🌾", "fertilize")}
@@ -1034,6 +1311,20 @@ async function viewPlant(id) {
       <button class="btn small secondary" id="btnPrune">Pruned</button>
       <button class="btn small secondary" id="btnEdit">Edit</button>
     </div>
+
+    ${(p.alsoContains || []).length ? `
+      <div class="card flat">
+        <b>Sharing this pot</b>
+        <p class="subtitle" style="margin:4px 0 10px">One watering can between them — the schedule follows whichever dries out first.</p>
+        ${[{ key: p.speciesKey, name: p.species || g.name }, ...p.alsoContains].map(a => {
+          const e = guideEntry(a.key);
+          return `<div class="pot-mate">
+            <span class="pot-mate-emoji">${e.emoji}</span>
+            <div><div class="pot-mate-name">${esc(a.name)}</div>
+            <div class="pot-mate-need">${esc(e.light)} · water every ~${e.waterDays}d</div></div>
+          </div>`;
+        }).join("")}
+      </div>` : ""}
 
     <div class="tip-card"><b>Care tips — ${esc(g.name)}</b><br>
       ${esc(g.light)}<br>${esc(g.tips)}</div>
@@ -1330,8 +1621,18 @@ async function viewSettings() {
           <button class="btn secondary" id="syncNowBtn">Sync now</button>
           <button class="btn danger" id="syncOffBtn">Disconnect</button>
         </div>` : `
-        <p class="subtitle"><b>Only one of you does this.</b> The other phone gets a link and joins with one tap.</p>
-        <details style="margin-bottom:12px" open>
+        <div class="join-box">
+          <b>Already have a garden on another device?</b>
+          <p class="subtitle" style="margin:4px 0 10px">Paste the pairing link from that device — this is the only way to join an existing garden. Typing the database details below starts a <em>new, empty</em> one.</p>
+          <form id="joinForm" class="inline-form">
+            <input type="text" id="joinLink" placeholder="Paste pairing link" autocapitalize="off" autocorrect="off" spellcheck="false">
+            <button class="btn" type="submit">Join</button>
+          </form>
+          <div id="joinMsg"></div>
+        </div>
+
+        <p class="subtitle" style="margin-top:22px"><b>Setting up for the first time?</b> Only one of you does this. The other device joins with the pairing link.</p>
+        <details style="margin-bottom:12px">
           <summary style="cursor:pointer;font-weight:600">Set up the shared database (~5 min, free, once)</summary>
           <ol style="padding-left:18px;font-size:.85rem;margin-top:8px;line-height:1.6">
             <li>Open <b>supabase.com</b>, sign up (free — no card needed), and click <b>New project</b>. Any name works; save the database password it asks for, you won't need it again.</li>
@@ -1347,7 +1648,7 @@ async function viewSettings() {
             <input type="text" id="syncUrl" placeholder="https://xxxx.supabase.co" autocapitalize="off" autocorrect="off"></div>
           <div class="field"><label for="syncKey">anon public key</label>
             <input type="text" id="syncKey" placeholder="eyJ… or sb_publishable_…" autocapitalize="off" autocorrect="off"></div>
-          <button class="btn block" type="submit">Connect</button>
+          <button class="btn block" type="submit">Create a new garden</button>
         </form>`}
     </div>
 
@@ -1535,6 +1836,25 @@ async function viewSettings() {
       render();
     });
   }
+  const joinForm = document.getElementById("joinForm");
+  if (joinForm) joinForm.addEventListener("submit", async e => {
+    e.preventDefault();
+    const msg = document.getElementById("joinMsg");
+    const raw = document.getElementById("joinLink").value.trim();
+    if (!raw) return;
+    // Accept the whole link, just the hash, or the bare payload — whatever
+    // survived the trip through a messaging app.
+    const payload = raw.split("#/pair/").pop().replace(/^#?\/?(pair\/)?/, "").trim();
+    msg.innerHTML = `<p class="subtitle">Joining…</p>`;
+    try {
+      await acceptPairing(payload);
+      toast("Joined — your plants are on the way");
+      render();
+    } catch (err) {
+      msg.innerHTML = `<p class="subtitle">⚠️ ${esc(syncFriendlyError(err.message))}</p>`;
+    }
+  });
+
   const pairBtn = document.getElementById("pairBtn");
   if (pairBtn) pairBtn.addEventListener("click", async () => {
     const link = pairingLink();
@@ -1733,6 +2053,18 @@ async function render() {
 
   if (syncConfigured()) syncConnect().catch(() => {});
   maybeAutoSyncCalendar();
+
+  /* Realtime carries changes while the app is open, and a 60s timer backstops
+     it. Neither helps the moment you unlock your phone and look: the realtime
+     socket may have been dropped in the background, and the timer can be 59
+     seconds away. Pull on the way back in, so what you see is current. */
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if (!syncConfigured()) return;
+    if (SYNC.client) { syncFlushOutbox().catch(() => {}); syncPull().catch(() => {}); }
+    else syncConnect().catch(() => {});
+  });
+
   window.addEventListener("online", () => {
     if (syncConfigured()) {
       if (SYNC.client) { syncFlushOutbox().catch(() => {}); syncPull().catch(() => {}); }
