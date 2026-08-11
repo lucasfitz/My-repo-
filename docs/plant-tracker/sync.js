@@ -13,7 +13,9 @@ const SYNC = {
   pullTimer: null,
 };
 
-const SYNC_STORES = ["plants", "logs", "tasks", "photos"];
+// "species" rides along: a species learned on one phone should not have to be
+// learned again on the other. Settings stay out — they hold the API key.
+const SYNC_STORES = ["plants", "logs", "tasks", "photos", "species"];
 const PHOTO_BUCKET = "plant-photos";
 
 // Paste into Supabase > SQL Editor > Run. Safe to run more than once.

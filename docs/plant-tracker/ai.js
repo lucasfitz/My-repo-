@@ -424,6 +424,66 @@ async function aiIdentifySpecies(blob) {
   return result;
 }
 
+/* ---------------------------------------------------------------------------
+   Learning a species the guide doesn't have
+
+   A hand-written list is never finished — every gap costs the owner a dead end
+   at exactly the moment they're trying to add a plant. Rather than grow the
+   list forever, the app asks for the care profile of whatever was typed and
+   keeps it. Learned species are stored like any other record and sync to the
+   other phone, so each one is learned once for the household.
+
+   No numeric bounds in the schema: structured outputs reject them, so the
+   ranges live in the descriptions and are clamped on arrival.
+   --------------------------------------------------------------------------- */
+const SPECIES_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["found", "name", "latin_name", "water_every_days", "fertilize_every_days", "light", "tips", "note"],
+  properties: {
+    found: { type: "boolean", description: "True if this is a real, identifiable plant you can give care advice for. False for gibberish or something that isn't a plant." },
+    name: { type: "string", description: "Common name, title case. Fall back to the botanical name if there is no common one." },
+    latin_name: { type: "string", description: "Botanical name. Genus alone is fine when the query names only a genus." },
+    water_every_days: { type: "integer", description: "Typical days between waterings in the growing season, 1-30. Err on the dry side for anything succulent or Mediterranean." },
+    fertilize_every_days: { type: "integer", description: "Typical days between feeds in the growing season, 0-120. Use 0 for plants that are harmed by feeding — carnivores, legumes, Proteaceae, and anything that wants lean soil." },
+    light: { type: "string", description: "Short light requirement, phrased like 'Bright indirect light' or 'Full direct sun'." },
+    tips: { type: "string", description: "Two or three sentences of care advice specific to this plant: the mistake people actually make with it, and how to tell it is unhappy. No generic filler." },
+    note: { type: "string", description: "Empty if found. Otherwise a short line explaining why no advice could be given." },
+  },
+};
+
+async function aiLearnSpecies(query) {
+  const result = await askClaude({
+    system:
+      "You supply care data for a plant-care app whose built-in guide didn't have the plant the owner typed. " +
+      "Give the care a knowledgeable grower would give, not a hedged average: intervals are a starting schedule the " +
+      "owner will adjust, so commit to a number.\n\n" +
+      "Be careful with plants that are harmed by ordinary care — Proteaceae and Australian natives are killed by " +
+      "phosphorus, carnivorous plants by fertilizer and tap water, succulents by a weekly watering can. Where that " +
+      "applies, say so in the tips rather than leaving it to be discovered.\n\n" +
+      "If the query names a genus rather than a species, answer for the genus as commonly grown. If it isn't a plant " +
+      "or you can't tell what was meant, set found to false rather than guessing.",
+    messages: [{ role: "user", content: `Care profile for: ${query}` }],
+    schema: SPECIES_SCHEMA,
+    effort: "low",
+    maxTokens: 3000,
+  });
+  if (!result.found) throw new Error(result.note || `No care data found for "${query}".`);
+
+  // The model is asked for sane ranges but nothing enforces them on the wire.
+  const clamp = (n, lo, hi, fallback) =>
+    Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : fallback;
+  return {
+    name: (result.name || query).trim(),
+    latin: (result.latin_name || "").trim(),
+    emoji: "🪴",
+    waterDays: clamp(result.water_every_days, 1, 60, 7),
+    fertDays: clamp(result.fertilize_every_days, 0, 180, 30),
+    light: (result.light || "Check the nursery tag").trim(),
+    tips: (result.tips || "").trim(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Garden-wide advisor: reasons over every plant's state + care + weather
 // ---------------------------------------------------------------------------

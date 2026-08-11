@@ -5,7 +5,7 @@
 // IndexedDB wrapper
 // ---------------------------------------------------------------------------
 const DB_NAME = "sprout-db";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let _db = null;
 
 function openDB() {
@@ -26,6 +26,8 @@ function openDB() {
       if (!db.objectStoreNames.contains("tasks")) db.createObjectStore("tasks", { keyPath: "id" });
       if (!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath: "key" });
       if (!db.objectStoreNames.contains("outbox")) db.createObjectStore("outbox", { keyPath: "id" });
+      // Species learned on demand, keyed like the built-in guide entries.
+      if (!db.objectStoreNames.contains("species")) db.createObjectStore("species", { keyPath: "key" });
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
@@ -370,8 +372,46 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.hidden = true; }, 2200);
 }
+/* The built-in guide plus everything learned on demand.
+
+   PLANT_GUIDE ships with the app; LEARNED comes from the database and syncs
+   between phones, so a species looked up on one is present on the other. The
+   built-in entry wins on a key collision — it was curated, and a plant already
+   referencing that key expects it. */
+let LEARNED = [];
+
+function allSpecies() {
+  if (!LEARNED.length) return PLANT_GUIDE;
+  const known = new Set(PLANT_GUIDE.map(g => g.key));
+  return PLANT_GUIDE.concat(LEARNED.filter(g => !known.has(g.key)));
+}
+
+async function loadLearnedSpecies() {
+  try { LEARNED = (await dbAll("species")).filter(g => g && g.key && g.name); }
+  catch { LEARNED = []; }
+}
+
+// A key has to be stable and unique: plants store it, so a collision would
+// silently repoint one plant's care at another species.
+function speciesKeyFor(entry) {
+  const base = (entry.latin || entry.name).toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "species";
+  const taken = new Set(allSpecies().map(g => g.key));
+  if (!taken.has(base)) return base;
+  for (let i = 2; i < 100; i++) if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
+  return `${base}-${uid()}`;
+}
+
+async function saveLearnedSpecies(entry) {
+  const rec = { ...entry, key: entry.key || speciesKeyFor(entry), learnedAt: new Date().toISOString() };
+  await saveRecord("species", rec);
+  LEARNED = LEARNED.filter(g => g.key !== rec.key).concat(rec);
+  return rec;
+}
+
 function guideEntry(key) {
-  return PLANT_GUIDE.find(g => g.key === key) || PLANT_GUIDE.find(g => g.key === "other");
+  const all = allSpecies();
+  return all.find(g => g.key === key) || all.find(g => g.key === "other");
 }
 function plantEmoji(p) { return guideEntry(p.speciesKey).emoji; }
 
@@ -586,6 +626,26 @@ function potSummary(p) {
   parts.push(esc(p.species || guideEntry(p.speciesKey).name) + (n > 1 ? ` \u00d7${n}` : ""));
   (p.alsoContains || []).forEach(a => parts.push(esc(a.name)));
   return parts.join(" + ");
+}
+
+/* Look a species up, keep it, and hand it to whoever asked.
+
+   The row it was launched from becomes the progress indicator: the lookup
+   takes a few seconds and the list is the only thing the owner is looking at.
+   A failure leaves the search open so the query can be reworded — the typed
+   text is still a perfectly good custom species name if they'd rather move on. */
+async function learnAndPick(query, row, pick) {
+  if (!query) return;
+  row.classList.add("busy");
+  row.innerHTML = `<span class="ac-ask-icon">✦</span><span>Looking up "${esc(query)}"…</span>`;
+  try {
+    const entry = await saveLearnedSpecies(await aiLearnSpecies(query));
+    toast(`Added ${entry.name} to the guide`);
+    pick(entry);
+  } catch (err) {
+    row.classList.remove("busy");
+    row.innerHTML = `<span class="ac-ask-icon">·</span><span>${esc(err.message)}</span>`;
+  }
 }
 
 /* Species rows show a photograph of the plant, not a stand-in glyph. The
@@ -1091,7 +1151,7 @@ async function viewAddEdit(editId = null) {
         <label for="pSpeciesSearch">Species</label>
         <div class="autocomplete">
           <input type="text" id="pSpeciesSearch" maxlength="80" autocomplete="off" autocapitalize="off"
-            placeholder="Search ${PLANT_GUIDE.length - 1}+ species…"
+            placeholder="Search ${allSpecies().length - 1}+ species…"
             value="${esc(speciesValue)}">
           <div class="ac-list" id="speciesResults" hidden></div>
         </div>
@@ -1212,22 +1272,38 @@ async function viewAddEdit(editId = null) {
   sInput.addEventListener("input", () => {
     const q = sInput.value.trim().toLowerCase();
     if (!q) { sList.hidden = true; hint.textContent = ""; return; }
-    const hits = PLANT_GUIDE
+    const hits = allSpecies()
       .filter(g => g.key !== "other")
       .map(g => ({ g, rank: rankSpecies(g, q) }))
       .filter(x => x.rank < 99)
       .sort((a, b) => a.rank - b.rank || a.g.name.localeCompare(b.g.name))
       .slice(0, 8)
       .map(x => x.g);
+    // Nothing in the guide is only a dead end if we leave it there — offer to
+    // go and find out. Also offered alongside weak matches, since searching
+    // "leucadendron" can surface something unrelated that merely contains the
+    // letters rather than the plant in hand.
+    const askRow = aiConfigured()
+      ? `<button type="button" class="ac-item ac-ask" data-ask="${esc(sInput.value.trim())}">
+           <span class="ac-ask-icon">✦</span>
+           <span><b>Look up "${esc(sInput.value.trim())}"</b><br>
+           <span class="ac-ask-sub">Not in the guide — ask Claude for its care, and keep it</span></span>
+         </button>`
+      : "";
     sList.innerHTML = hits.length
-      ? speciesRowsHTML(hits)
-      : `<div class="ac-item ac-none">No match — it'll be saved as a custom species with default care</div>`;
+      ? speciesRowsHTML(hits) + (hits.every(h => rankSpecies(h, q) > 2) ? askRow : "")
+      : (askRow || `<div class="ac-item ac-none">No match — it'll be saved as a custom species with default care</div>`);
     sList.hidden = false;
     if (hits.length) fillSpeciesThumbs(sList, hits);
   });
-  sList.addEventListener("mousedown", e => {
+  sList.addEventListener("mousedown", async e => {
     const item = e.target.closest(".ac-item");
-    if (item && item.dataset.key) { e.preventDefault(); pickSpecies(guideEntry(item.dataset.key)); }
+    if (!item) return;
+    if (item.dataset.key) { e.preventDefault(); pickSpecies(guideEntry(item.dataset.key)); return; }
+    if (item.dataset.ask !== undefined) {
+      e.preventDefault();
+      await learnAndPick(item.dataset.ask, item, pickSpecies);
+    }
   });
   sInput.addEventListener("blur", () => setTimeout(() => { sList.hidden = true; }, 200));
 
@@ -1260,7 +1336,7 @@ async function viewAddEdit(editId = null) {
     const q = alsoInput.value.trim().toLowerCase();
     if (!q) { alsoList.hidden = true; return; }
     const taken = new Set([sKey.value, ...alsoContains.map(a => a.key)]);
-    const hits = PLANT_GUIDE
+    const hits = allSpecies()
       .filter(g => g.key !== "other" && !taken.has(g.key))
       .map(g => ({ g, rank: rankSpecies(g, q) }))
       .filter(x => x.rank < 99)
@@ -1337,7 +1413,7 @@ async function viewAddEdit(editId = null) {
     const plant = editing || { id: uid(), createdAt: new Date().toISOString(), archived: false };
     plant.name = document.getElementById("pName").value.trim();
     const typed = sInput.value.trim();
-    const exact = PLANT_GUIDE.find(g => g.name.toLowerCase() === typed.toLowerCase());
+    const exact = allSpecies().find(g => g.name.toLowerCase() === typed.toLowerCase());
     if (typed && typed === confirmedName.trim()) { /* keep sKey as-is */ }
     else if (exact) sKey.value = exact.key;
     else sKey.value = "other";
@@ -1751,7 +1827,7 @@ async function viewGuide() {
     <h1>Care guide</h1>
     <p class="subtitle">${mine.length
       ? `Care for the ${mine.length} species in your collection${season ? `, and what they need in ${season}` : ""}.`
-      : `Suggested schedules & tips for ${PLANT_GUIDE.length - 1} common houseplants.`}</p>
+      : `Suggested schedules & tips for ${allSpecies().length - 1} common houseplants.`}</p>
     <div class="tip-card">${SEASONAL_TIPS[season]}</div>
 
     ${mine.length ? `
@@ -1764,9 +1840,9 @@ async function viewGuide() {
       <p class="subtitle" style="margin:6px 0 0">Add a plant and its care notes show up at the top of this page.</p></div>`}
 
     <div class="section-head"><h2>All species</h2></div>
-    <div class="search-bar"><input type="text" id="guideSearch" placeholder="Search ${PLANT_GUIDE.length - 1} species…"></div>
+    <div class="search-bar"><input type="text" id="guideSearch" placeholder="Search ${allSpecies().length - 1} species…"></div>
     <div id="guideAll" hidden></div>
-    <button class="btn block secondary" id="guideBrowse">Browse all ${PLANT_GUIDE.length - 1} species</button>`;
+    <button class="btn block secondary" id="guideBrowse">Browse all ${allSpecies().length - 1} species</button>`;
 
   const all = document.getElementById("guideAll");
   const browse = document.getElementById("guideBrowse");
@@ -1777,7 +1853,7 @@ async function viewGuide() {
   // open to check one plant — so the full list is built only when asked for.
   const buildAll = () => {
     if (built) return;
-    all.innerHTML = PLANT_GUIDE.filter(g => g.key !== "other").map(g => card(g, null)).join("");
+    all.innerHTML = allSpecies().filter(g => g.key !== "other").map(g => card(g, null)).join("");
     built = true;
     wireCards(all);
   };
@@ -2460,6 +2536,7 @@ async function render() {
 // ---------------------------------------------------------------------------
 (async function boot() {
   await loadSettings();
+  await loadLearnedSpecies();
   renderProfileChip();
 
   // Arrow keys mirror the swipe, for anyone on a laptop. Registered once —

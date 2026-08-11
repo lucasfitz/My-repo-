@@ -569,6 +569,19 @@ body.sheet-open { overflow: hidden; }
 .ac-item:hover, .ac-item:active { background: var(--surface-sunk); }
 .ac-latin { color: var(--ink-2); font-style: italic; font-size: 13px; }
 .ac-none { color: var(--ink-2); cursor: default; display: block; }
+/* Offer to go and find a species the guide doesn't have. Reads as an action,
+   not as another result — it costs a network call and adds to the guide. */
+.ac-ask {
+  width: 100%; text-align: left; border: none; background: none; font: inherit;
+  color: var(--ink); border-top: 1px solid var(--hairline); line-height: 1.35;
+}
+.ac-ask-icon {
+  flex: none; width: 30px; height: 30px; border-radius: var(--r-pill);
+  display: grid; place-items: center; background: var(--grow-bg); color: var(--grow);
+  font-size: 14px;
+}
+.ac-ask-sub { color: var(--ink-2); font-size: 12.5px; }
+.ac-ask.busy { color: var(--ink-2); cursor: progress; }
 
 
 /* ---------- Week at a glance ---------- */
