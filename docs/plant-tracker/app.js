@@ -547,6 +547,7 @@ async function viewPlants() {
       <button class="pill ${groupBy === "name" ? "active" : ""}" data-group="name">All</button>
       <button class="pill ${groupBy === "room" ? "active" : ""}" data-group="room">By room</button>
       <button class="pill ${groupBy === "due" ? "active" : ""}" data-group="due">Needs water</button>
+      <button class="pill ${groupBy === "health" ? "active" : ""}" data-group="health">By health</button>
     </div>`;
 
   if (!plants.length) {
@@ -594,6 +595,31 @@ async function viewPlants() {
       return { card: cards[i], delta: due ? daysBetween(todayStr(), due) : Infinity };
     }).sort((a, b) => a.delta - b.delta);
     html += `<div class="plant-grid" id="plantGrid">${order.map(o => o.card).join("")}</div>`;
+  } else if (groupBy === "health") {
+    // Worst first — the point of this order is to surface what needs help.
+    // Plants never checked have no score to rank on and sit at the end under
+    // their own heading, rather than being scored 0 and jumping the queue.
+    const scored = [], unchecked = [];
+    plants.forEach((p, i) => {
+      const score = p.health && typeof p.health.score === "number" ? p.health.score : null;
+      (score === null ? unchecked : scored).push({ card: cards[i], score, name: p.name });
+    });
+    scored.sort((a, b) => a.score - b.score || a.name.localeCompare(b.name));
+    if (scored.length) {
+      html += `<div class="plant-group">
+        <div class="group-head"><h2>Needs the most help</h2><span class="group-count">${scored.length}</span></div>
+        <div class="plant-grid">${scored.map(o => o.card).join("")}</div>
+      </div>`;
+    } else {
+      html += `<div class="card flat"><b>No health checks yet</b>
+        <p class="subtitle" style="margin:6px 0 0">Open a plant and run a health check, or add a photo — one runs automatically.</p></div>`;
+    }
+    if (unchecked.length) {
+      html += `<div class="plant-group">
+        <div class="group-head"><h2>Not checked yet</h2><span class="group-count">${unchecked.length}</span></div>
+        <div class="plant-grid">${unchecked.map(o => o.card).join("")}</div>
+      </div>`;
+    }
   } else {
     html += `<div class="plant-grid" id="plantGrid">${cards.join("")}</div>`;
   }
