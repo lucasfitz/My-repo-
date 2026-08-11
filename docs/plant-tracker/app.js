@@ -246,9 +246,21 @@ function resizeImage(file, maxDim = 1400) {
   });
 }
 
-async function addPhoto(plantId, file) {
-  const blob = await resizeImage(file);
+/* The one place a photo the user supplied gets stored. Every entry point goes
+   through here — the add form, the photo journal — so a new photo always
+   triggers a health check and the next entry point added can't forget to.
+
+   `assess: false` is for callers saving several photos in one go: they fire a
+   single check once everything is saved, since an assessment reads the newest
+   few photos anyway and one call per file would be pure waste. The backup
+   restore writes photo records directly and deliberately doesn't come through
+   here — re-importing a collection shouldn't fire a check per plant.
+
+   `resize: false` is for a blob that's already been through resizeImage(). */
+async function addPhoto(plantId, file, { assess = true, resize = true } = {}) {
+  const blob = resize ? await resizeImage(file) : file;
   await saveRecord("photos", { id: uid(), plantId, blob, createdAt: new Date().toISOString() });
+  if (assess) autoAssess(plantId);
 }
 
 async function latestPhotoURL(plantId) {
@@ -1224,12 +1236,10 @@ async function viewAddEdit(editId = null) {
     plant.notes = document.getElementById("pNotes").value.trim();
     await saveRecord("plants", plant);
     if (!editing) {
-      if (photo) {
-        await saveRecord("photos", { id: uid(), plantId: plant.id, blob: photo, createdAt: new Date().toISOString() });
-        // The photo that identified it can also grade it — one check per new
-        // plant, in the background, so a bulk add still moves at photo speed.
-        autoAssess(plant.id);
-      }
+      // The photo that identified it can also grade it — one check per new
+      // plant, in the background, so a bulk add still moves at photo speed.
+      // Already resized when it was picked.
+      if (photo) await addPhoto(plant.id, photo, { resize: false });
       await saveRecord("logs", { id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: state.settings.activeUser, note: "Added to the collection" });
     }
     if (!editing && queue.length) {
@@ -1411,7 +1421,7 @@ async function viewPlant(id) {
     ${p.notes ? `<div class="card flat"><b>Notes</b><br>${esc(p.notes).replace(/\n/g, "<br>")}</div>` : ""}
 
     <div class="section-head"><h2>Photo journal</h2>
-      <label class="btn small secondary" style="cursor:pointer">Add photo<input type="file" id="photoInput" accept="image/*" hidden></label>
+      <label class="btn small secondary" style="cursor:pointer">Add photo<input type="file" id="photoInput" accept="image/*" multiple hidden></label>
     </div>
     ${photos.length ? `<div class="gallery" id="gallery">
       ${photos.map(ph => `<img src="${URL.createObjectURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}
@@ -1468,14 +1478,20 @@ async function viewPlant(id) {
     location.hash = "#/plants";
   });
   document.getElementById("photoInput").addEventListener("change", async e => {
-    const file = e.target.files[0];
-    if (!file) return;
-    try {
-      await addPhoto(id, file);
-      toast(aiConfigured() ? "Photo saved — checking health…" : "Photo saved");
-      autoAssess(id);
-      render();
-    } catch { toast("Couldn't read that image"); }
+    const files = [...e.target.files];
+    if (!files.length) return;
+    // Save them all, then run one check — an assessment reads the newest few
+    // photos, so a call per file would ask the same question repeatedly.
+    let saved = 0;
+    for (const file of files) {
+      try { await addPhoto(id, file, { assess: false }); saved++; } catch { /* skip unreadable */ }
+    }
+    if (!saved) { toast("Couldn't read that image"); return; }
+    const label = saved > 1 ? `${saved} photos saved` : "Photo saved";
+    toast(aiConfigured() ? `${label} — checking health…` : label);
+    if (saved < files.length) toast(`Skipped ${files.length - saved} unreadable photo(s)`);
+    autoAssess(id);
+    render();
   });
   const gallery = document.getElementById("gallery");
   if (gallery) gallery.addEventListener("click", e => {
