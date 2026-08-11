@@ -67,7 +67,9 @@ async function removeRecord(store, id) {
 // ---------------------------------------------------------------------------
 // Settings / household profiles
 // ---------------------------------------------------------------------------
-const state = { settings: { users: ["Lucas", "Kelly"], activeUser: "Lucas", lastNotified: "", rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office", "Porch"] } };
+// waterDays: Sunday and Wednesday by default — twice a week, so nothing waits
+// more than four days, and no watering lands on a weekday morning.
+const state = { settings: { users: ["Lucas", "Kelly"], activeUser: "Lucas", lastNotified: "", waterDays: [0, 3], rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office", "Porch"] } };
 
 async function loadSettings() {
   const row = await dbGet("settings", "main");
@@ -182,6 +184,55 @@ function dueLabel(dueStr) {
 
 // Due date for an action on a plant. Falls back to createdAt if never done.
 // Outdoor plants' watering interval flexes with the season (weather.js).
+/* Watering days.
+
+   Left to itself, a collection of any size puts something on the list every
+   single day, which nobody actually does. Instead watering collects onto
+   chosen days of the week: on a watering day you do everything that would
+   otherwise come due before the next one.
+
+   Empty means no batching — every plant on its own natural day. */
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function waterDays() {
+  const d = state.settings.waterDays;
+  return Array.isArray(d) ? [...new Set(d.filter(n => Number.isInteger(n) && n >= 0 && n <= 6))].sort() : [];
+}
+
+// The longest run between consecutive watering days — twice a week is a 3-day
+// gap and a 4-day one, so 4 is what a plant has to survive.
+function maxWaterGap(days) {
+  if (!days.length) return Infinity;
+  let max = 0;
+  for (let i = 0; i < days.length; i++) {
+    const next = days[(i + 1) % days.length];
+    max = Math.max(max, i === days.length - 1 ? 7 - days[i] + next : next - days[i]);
+  }
+  return max;
+}
+
+/* Move a watering date back to the most recent watering day.
+
+   Backwards, not forwards: a little early is harmless, whereas rounding up to
+   the next slot could leave a thirsty plant dry for most of a week. A plant
+   that needs water more often than the rhythm's longest gap can't be served by
+   it at all — outdoor pots in summer, mostly — so it keeps its own schedule. */
+function snapToWaterDay(dateStr, every) {
+  const days = waterDays();
+  if (!days.length || every < maxWaterGap(days)) return dateStr;
+  const d = new Date(dateStr + "T12:00:00");
+  for (let i = 0; i < 7; i++) {
+    if (days.includes(d.getDay())) break;
+    d.setDate(d.getDate() - 1);
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+function isWateringDay(dateStr = todayStr()) {
+  const days = waterDays();
+  return !days.length || days.includes(new Date(dateStr + "T12:00:00").getDay());
+}
+
 function nextDue(plant, kind) {
   let every = kind === "water" ? plant.waterEvery : plant.fertEvery;
   if (!every) return null; // schedule disabled
@@ -190,7 +241,8 @@ function nextDue(plant, kind) {
   }
   const last = kind === "water" ? plant.lastWatered : plant.lastFertilized;
   const base = last || plant.createdAt.slice(0, 10);
-  return addDays(base, every);
+  const due = addDays(base, every);
+  return kind === "water" ? snapToWaterDay(due, every) : due;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +280,30 @@ async function logAction(plantId, type, note = "") {
 // ---------------------------------------------------------------------------
 // Photos
 // ---------------------------------------------------------------------------
+/* An object URL pins its blob in memory until it is revoked; dropping the
+   <img> that used it is not enough. The plant screens mint one per photo on
+   every render, and swiping between plants re-renders constantly, so browsing
+   the collection leaked a full-size photo per card. These are handed out for
+   the current view and released when it is replaced. */
+let viewURLs = [];
+function viewURL(blob) {
+  const url = URL.createObjectURL(blob);
+  viewURLs.push(url);
+  return url;
+}
+function releaseViewURLs() {
+  viewURLs.forEach(u => URL.revokeObjectURL(u));
+  viewURLs = [];
+}
+
+/* Sizing a canvas to 0 is what actually frees its pixel buffer — dropping the
+   reference leaves it allocated until the collector runs, which on a phone
+   mid-upload is too late to matter. */
+function releaseCanvas(canvas) {
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
 function resizeImage(file, maxDim = 1400) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -239,7 +315,15 @@ function resizeImage(file, maxDim = 1400) {
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      canvas.toBlob(b => b ? resolve(b) : reject(new Error("encode failed")), "image/jpeg", 0.85);
+      canvas.toBlob(b => {
+        // A phone photo decodes to ~50MB of pixels, and a bulk upload does this
+        // once per file. Dropping the backing store and the decoded image the
+        // moment we have the JPEG keeps the peak to one photo at a time rather
+        // than however many the collector hasn't got round to yet.
+        releaseCanvas(canvas);
+        img.src = "";
+        b ? resolve(b) : reject(new Error("encode failed"));
+      }, "image/jpeg", 0.85);
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
     img.src = url;
@@ -267,7 +351,7 @@ async function latestPhotoURL(plantId) {
   const photos = (await dbAllByIndex("photos", "plantId", plantId)).filter(p => p.blob);
   if (!photos.length) return null;
   photos.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return URL.createObjectURL(photos[0].blob);
+  return viewURL(photos[0].blob);
 }
 
 // ---------------------------------------------------------------------------
@@ -1420,7 +1504,7 @@ async function viewPlant(id) {
   const photos = (await dbAllByIndex("photos", "plantId", id)).filter(ph => ph.blob).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const logs = (await dbAllByIndex("logs", "plantId", id)).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 30);
   const addedIds = (await dbAll("tasks")).map(t => t.id);
-  const heroURL = photos.length ? URL.createObjectURL(photos[0].blob) : null;
+  const heroURL = photos.length ? viewURL(photos[0].blob) : null;
 
   const wDue = nextDue(p, "water"), fDue = nextDue(p, "fertilize");
   const badge = (due, cls, icon, label) => {
@@ -1505,7 +1589,7 @@ async function viewPlant(id) {
       <label class="btn small secondary" style="cursor:pointer">Add photo<input type="file" id="photoInput" accept="image/*" multiple hidden></label>
     </div>
     ${photos.length ? `<div class="gallery" id="gallery">
-      ${photos.map(ph => `<img src="${URL.createObjectURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}
+      ${photos.map(ph => `<img src="${viewURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}
     </div>` : `<p class="subtitle">No photos yet — take a growth pic!</p>`}
 
     <h2>History</h2>
@@ -1582,6 +1666,7 @@ async function viewPlant(id) {
 async function openPhotoViewer(photoId, plantId) {
   const ph = await dbGet("photos", photoId);
   if (!ph) return;
+  const url = URL.createObjectURL(ph.blob);
   const div = document.createElement("div");
   div.className = "photo-viewer";
   div.innerHTML = `
@@ -1589,14 +1674,16 @@ async function openPhotoViewer(photoId, plantId) {
       <button class="btn small danger" id="pvDelete">Delete</button>
       <button class="btn small secondary" id="pvClose">Close ✕</button>
     </div>
-    <img src="${URL.createObjectURL(ph.blob)}" alt="">`;
+    <img src="${url}" alt="">`;
   document.body.appendChild(div);
-  div.addEventListener("click", e => { if (e.target === div) div.remove(); });
-  div.querySelector("#pvClose").addEventListener("click", () => div.remove());
+  // This one lives outside #view, so it isn't covered by the per-view release.
+  const close = () => { div.remove(); URL.revokeObjectURL(url); };
+  div.addEventListener("click", e => { if (e.target === div) close(); });
+  div.querySelector("#pvClose").addEventListener("click", close);
   div.querySelector("#pvDelete").addEventListener("click", async () => {
     if (!confirm("Delete this photo?")) return;
     await removeRecord("photos", photoId);
-    div.remove();
+    close();
     render();
   });
 }
@@ -1793,6 +1880,15 @@ async function viewSettings() {
         <input type="text" id="renameInput" placeholder="Rename active member…" maxlength="30">
         <button class="btn secondary" type="submit">Rename</button>
       </form>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Watering days</h2>
+      <p class="subtitle">Watering collects onto the days you pick, so you're not doing a little every day. On a watering day you do everything that would come due before the next one.</p>
+      <div class="pill-row" id="waterDayPills">
+        ${DAY_NAMES.map((d, i) => `<button class="pill ${waterDays().includes(i) ? "active" : ""}" data-day="${i}">${d}</button>`).join("")}
+      </div>
+      <p class="subtitle" id="waterDayHint" style="margin-bottom:0"></p>
     </div>
 
     <div class="card">
@@ -2171,6 +2267,29 @@ async function viewSettings() {
       render();
     });
   });
+
+  const dayHint = document.getElementById("waterDayHint");
+  const showDayHint = () => {
+    const days = waterDays();
+    if (!days.length) {
+      dayHint.textContent = "No watering days picked — every plant is listed on its own day.";
+      return;
+    }
+    const gap = maxWaterGap(days);
+    dayHint.textContent = `${days.map(d => DAY_NAMES[d]).join(", ")} — nothing waits more than ${gap} day${gap === 1 ? "" : "s"}. `
+      + `Plants that need water more often than that (outdoor pots in summer, mostly) keep their own schedule.`;
+  };
+  showDayHint();
+  document.querySelectorAll("#waterDayPills .pill").forEach(pill => {
+    pill.addEventListener("click", async () => {
+      const day = Number(pill.dataset.day);
+      const days = waterDays();
+      state.settings.waterDays = days.includes(day) ? days.filter(d => d !== day) : [...days, day].sort();
+      pill.classList.toggle("active");
+      await saveSettings();
+      showDayHint();
+    });
+  });
   document.getElementById("renameForm").addEventListener("submit", async e => {
     e.preventDefault();
     const name = document.getElementById("renameInput").value.trim();
@@ -2322,6 +2441,8 @@ async function render() {
   const route = routes.find(r => r.re.test(hash)) || routes[0];
   const m = hash.match(route.re);
   const onPlant = /^#\/plant\//.test(hash);
+  // The outgoing view's photos are about to be replaced — let go of them.
+  releaseViewURLs();
   if (!onPlant && !/^#\/edit\//.test(hash)) backHash = hash;
   setTopbarMode(onPlant);
   document.querySelectorAll(".tab").forEach(t =>

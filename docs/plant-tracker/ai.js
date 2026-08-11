@@ -94,6 +94,11 @@ function blobToApiImage(blob, maxDim = 800) {
       canvas.height = Math.round(img.height * scale);
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
       const dataURL = canvas.toDataURL("image/jpeg", 0.8);
+      // Free the pixels before the base64 string is handed back: an assessment
+      // does this three times over, and the string itself is the only part
+      // still needed.
+      releaseCanvas(canvas);
+      img.src = "";
       resolve(dataURL.slice(dataURL.indexOf(",") + 1)); // strip data: prefix → base64
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
@@ -303,26 +308,48 @@ async function assessNow(plantId) {
   finally { releaseAssess(plantId, { rerender: false }); }
 }
 
+/* Waiting their turn. One assessment runs at a time, app-wide.
+
+   These used to be independent per plant, so adding five photos in one go put
+   five vision requests in flight at once — each decoding photos into canvases
+   and holding them as base64 while it uploaded. That is enough memory pressure
+   on a phone for the browser to kill the tab mid-upload, which is exactly what
+   it did. Nobody is waiting on a background check, so a queue costs nothing. */
+const ASSESS_WAIT = [];
+let assessBusy = false;
+
 function autoAssess(plantId) {
   if (!aiConfigured()) return;
   // A photo landing mid-check still deserves a look — remember it and run
   // again once this one lands, rather than dropping it on the floor.
   if (ASSESSING.has(plantId)) { ASSESS_QUEUED.add(plantId); return; }
   ASSESSING.add(plantId);
-  (async () => {
-    try {
-      const health = await aiAssessPlant(plantId);
-      // Only speak up if the plant needs something; a clean bill of health
-      // arriving unprompted is noise.
-      if (health.score <= 5) toast(`Health check: ${health.status} — see the steps`);
-    } catch (err) {
-      console.warn("Sprout AI: automatic health check failed —", err.message);
-    } finally {
-      // Refresh whatever is on screen: the score belongs on the card and the
-      // pill row, not only on the detail page that started the check.
-      releaseAssess(plantId, { rerender: true });
+  ASSESS_WAIT.push(plantId);
+  pumpAssessQueue();
+}
+
+async function pumpAssessQueue() {
+  if (assessBusy) return;
+  assessBusy = true;
+  try {
+    while (ASSESS_WAIT.length) {
+      const plantId = ASSESS_WAIT.shift();
+      try {
+        const health = await aiAssessPlant(plantId);
+        // Only speak up if the plant needs something; a clean bill of health
+        // arriving unprompted is noise.
+        if (health.score <= 5) toast(`Health check: ${health.status} — see the steps`);
+      } catch (err) {
+        console.warn("Sprout AI: automatic health check failed —", err.message);
+      } finally {
+        // Refresh whatever is on screen: the score belongs on the card and the
+        // pill row, not only on the detail page that started the check.
+        releaseAssess(plantId, { rerender: true });
+      }
     }
-  })();
+  } finally {
+    assessBusy = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
