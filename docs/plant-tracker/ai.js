@@ -14,7 +14,7 @@ function aiConfigured() {
 // ---------------------------------------------------------------------------
 // Core API call: structured output, refusal handling, server-side fallbacks
 // ---------------------------------------------------------------------------
-async function askClaude({ system, messages, schema }) {
+async function askClaude({ system, messages, schema, maxTokens = 8000, effort = "high" }) {
   const res = await fetch(AI_API_URL, {
     method: "POST",
     headers: {
@@ -26,11 +26,11 @@ async function askClaude({ system, messages, schema }) {
     },
     body: JSON.stringify({
       model: AI_MODEL,
-      max_tokens: 8000,
+      max_tokens: maxTokens,
       fallbacks: "default",
       system,
       messages,
-      output_config: { format: { type: "json_schema", schema } },
+      output_config: { effort, format: { type: "json_schema", schema } },
     }),
   });
   if (!res.ok) {
@@ -47,9 +47,18 @@ async function askClaude({ system, messages, schema }) {
   if (data.stop_reason === "refusal") {
     throw new Error("The AI declined this request. Try a different photo.");
   }
+  // This model thinks by default, and max_tokens caps thinking and answer
+  // together — so a tight budget truncates the JSON rather than erroring.
+  if (data.stop_reason === "max_tokens") {
+    throw new Error("The answer got cut off. Try again.");
+  }
   const textBlock = (data.content || []).find(b => b.type === "text");
   if (!textBlock) throw new Error("Empty response from the AI.");
-  return JSON.parse(textBlock.text);
+  try {
+    return JSON.parse(textBlock.text);
+  } catch {
+    throw new Error("The AI sent back something unreadable. Try again.");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,9 +242,11 @@ function identifySchema() {
     properties: {
       is_plant: { type: "boolean", description: "false if the photo doesn't show a plant" },
       candidates: {
+        // No minItems/maxItems here: structured outputs reject array
+        // constraints, and raw HTTP has no SDK to quietly strip them — the
+        // whole request 400s. The cap is stated in the description below and
+        // enforced for real by the slice in aiIdentifySpecies().
         type: "array",
-        minItems: 1,
-        maxItems: MAX_CANDIDATES,
         items: {
           type: "object",
           properties: {
@@ -282,6 +293,8 @@ async function aiIdentifySpecies(blob) {
       ],
     }],
     schema: identifySchema(),
+    effort: "low",
+    maxTokens: 4000,
   });
   result.candidates = (result.candidates || []).slice(0, MAX_CANDIDATES);
   return result;
