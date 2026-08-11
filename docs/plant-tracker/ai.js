@@ -280,19 +280,34 @@ ${describeCareHistory(logs) || "(none recorded)"}`,
    there. `ASSESSING` both de-duplicates overlapping runs (bulk adds fire one
    per plant) and lets the detail view show that one is already in flight. */
 const ASSESSING = new Set();
+const ASSESS_QUEUED = new Set();
 
 function assessInFlight(plantId) { return ASSESSING.has(plantId); }
+
+/* Release the lock and honour anything that arrived while we were busy.
+
+   `rerender` is false for the manual button: its own handler re-renders on
+   success and writes the failure into the results box, and re-rendering from
+   here would detach that box before the message reached it. */
+function releaseAssess(plantId, { rerender }) {
+  ASSESSING.delete(plantId);
+  if (rerender && typeof render === "function") render();
+  if (ASSESS_QUEUED.delete(plantId)) autoAssess(plantId);
+}
 
 // The manual button goes through the same bookkeeping, so a re-render while a
 // check is running (a sync landing, say) doesn't reset the button to idle.
 async function assessNow(plantId) {
   ASSESSING.add(plantId);
   try { return await aiAssessPlant(plantId); }
-  finally { ASSESSING.delete(plantId); }
+  finally { releaseAssess(plantId, { rerender: false }); }
 }
 
 function autoAssess(plantId) {
-  if (!aiConfigured() || ASSESSING.has(plantId)) return;
+  if (!aiConfigured()) return;
+  // A photo landing mid-check still deserves a look — remember it and run
+  // again once this one lands, rather than dropping it on the floor.
+  if (ASSESSING.has(plantId)) { ASSESS_QUEUED.add(plantId); return; }
   ASSESSING.add(plantId);
   (async () => {
     try {
@@ -303,10 +318,9 @@ function autoAssess(plantId) {
     } catch (err) {
       console.warn("Sprout AI: automatic health check failed —", err.message);
     } finally {
-      ASSESSING.delete(plantId);
       // Refresh whatever is on screen: the score belongs on the card and the
       // pill row, not only on the detail page that started the check.
-      if (typeof render === "function") render();
+      releaseAssess(plantId, { rerender: true });
     }
   })();
 }
