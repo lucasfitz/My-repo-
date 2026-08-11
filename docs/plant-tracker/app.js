@@ -1374,6 +1374,49 @@ async function viewPlant(id) {
   const p = await dbGet("plants", id);
   if (!p) { location.hash = "#/plants"; return; }
   const g = guideEntry(p.speciesKey);
+
+  /* Swiping moves through the collection in the order the Plants tab lists it
+     by default — alphabetical — so "3 of 12" means something when you arrive
+     from that list. Wraps at both ends: on a phone, hitting an invisible wall
+     mid-swipe reads as the gesture having failed. */
+  const siblings = (await dbAll("plants")).filter(x => !x.archived)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const at = siblings.findIndex(x => x.id === id);
+  const go = step => {
+    if (siblings.length < 2 || at === -1) return;
+    location.hash = "#/plant/" + siblings[(at + step + siblings.length) % siblings.length].id;
+  };
+  plantNavGo = go;
+
+  const nav = document.getElementById("plantNav");
+  nav.hidden = siblings.length < 2;
+  document.getElementById("plantPos").textContent = `${at + 1} of ${siblings.length}`;
+  // Assignment rather than addEventListener: these elements outlive the view,
+  // so adding would stack a new handler on every plant you swipe to.
+  document.getElementById("prevPlant").onclick = () => go(-1);
+  document.getElementById("nextPlant").onclick = () => go(1);
+  document.getElementById("backBtn").onclick = () => { location.hash = backHash; };
+  document.getElementById("editBtn").onclick = () => { location.hash = "#/edit/" + id; };
+
+  const view = $view();
+  let sx = 0, sy = 0, tracking = false;
+  view.ontouchstart = e => {
+    tracking = e.touches.length === 1;
+    if (!tracking) return;
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+  };
+  view.ontouchend = e => {
+    if (!tracking) return;
+    tracking = false;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    // Must be a decisive sideways move: anything closer to vertical is the
+    // page being scrolled, and this screen is long enough to scroll a lot.
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    go(dx < 0 ? 1 : -1);
+  };
+
   const photos = (await dbAllByIndex("photos", "plantId", id)).filter(ph => ph.blob).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const logs = (await dbAllByIndex("logs", "plantId", id)).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 30);
   const addedIds = (await dbAll("tasks")).map(t => t.id);
@@ -1420,7 +1463,6 @@ async function viewPlant(id) {
     <div class="action-row">
       <button class="btn small secondary" id="btnRepot">Repotted</button>
       <button class="btn small secondary" id="btnPrune">Pruned</button>
-      <button class="btn small secondary" id="btnEdit">Edit</button>
     </div>
 
     ${(p.alsoContains || []).length ? `
@@ -1506,7 +1548,6 @@ async function viewPlant(id) {
   document.getElementById("btnFert").addEventListener("click", () => act("fertilize"));
   document.getElementById("btnRepot").addEventListener("click", () => act("repot"));
   document.getElementById("btnPrune").addEventListener("click", () => act("prune"));
-  document.getElementById("btnEdit").addEventListener("click", () => { location.hash = "#/edit/" + id; });
   document.getElementById("btnDelete").addEventListener("click", async () => {
     if (!confirm(`Remove ${p.name} and all its photos/history? This can't be undone.`)) return;
     for (const ph of photos) await removeRecord("photos", ph.id);
@@ -2246,10 +2287,43 @@ const routes = [
   { re: /^#\/pair\/(.+)$/, fn: m => viewPair(m[1]), tab: "settings" },
 ];
 
+/* Where the back button goes. Following browser history would sometimes leave
+   the app, and swiping from plant to plant would turn "back" into an undo of
+   the swipe — so remember the last screen that wasn't a plant or its edit form
+   and return there. That's Today if you came from a task, the list if you came
+   from the list. */
+let backHash = "#/plants";
+// Set while a plant is on screen, so the arrow keys have something to drive.
+let plantNavGo = null;
+
+/* The plant screen gets a detail-screen top bar: back on the left, Edit on the
+   right, position in the collection between them. None of that belongs on any
+   other screen, and the profile chip belongs to the app rather than to one
+   plant — both at once is clutter on a screen that is mostly photograph. */
+function setTopbarMode(onPlant) {
+  document.querySelector(".brand").hidden = onPlant;
+  document.getElementById("profileBtn").hidden = onPlant;
+  document.getElementById("backBtn").hidden = !onPlant;
+  document.getElementById("editBtn").hidden = !onPlant;
+  document.getElementById("plantNav").hidden = !onPlant;
+  // Claims horizontal gestures from the browser's back/forward navigation —
+  // only here, so every other screen keeps the native behaviour.
+  document.body.classList.toggle("swipe-nav", onPlant);
+  if (!onPlant) {
+    // Leaving the screen takes its gestures and key handling with it.
+    plantNavGo = null;
+    $view().ontouchstart = null;
+    $view().ontouchend = null;
+  }
+}
+
 async function render() {
   const hash = location.hash || "#/today";
   const route = routes.find(r => r.re.test(hash)) || routes[0];
   const m = hash.match(route.re);
+  const onPlant = /^#\/plant\//.test(hash);
+  if (!onPlant && !/^#\/edit\//.test(hash)) backHash = hash;
+  setTopbarMode(onPlant);
   document.querySelectorAll(".tab").forEach(t =>
     t.classList.toggle("active", t.dataset.tab === route.tab));
   try {
@@ -2266,6 +2340,16 @@ async function render() {
 (async function boot() {
   await loadSettings();
   renderProfileChip();
+
+  // Arrow keys mirror the swipe, for anyone on a laptop. Registered once —
+  // plantNavGo is null unless a plant is on screen.
+  document.addEventListener("keydown", e => {
+    if (!plantNavGo || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (document.querySelector(".sheet-wrap, .photo-viewer")) return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "")) return;
+    if (e.key === "ArrowLeft") { e.preventDefault(); plantNavGo(-1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); plantNavGo(1); }
+  });
   document.getElementById("profileBtn").addEventListener("click", async () => {
     const users = state.settings.users;
     const idx = users.indexOf(state.settings.activeUser);
