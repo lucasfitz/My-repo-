@@ -278,8 +278,44 @@ input[type=text], input[type=number], input[type=date], input[type=password], se
 input::placeholder, textarea::placeholder { color: var(--ink-3); }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--ink); }
 textarea { min-height: 84px; resize: vertical; }
+
+/* One height for every field, so two of them side by side line up with the
+   pair in the row above instead of stepping. */
+input[type=text], input[type=number], input[type=date], input[type=password], select {
+  min-height: 52px;
+}
+
+/* iOS renders a date input as a button-like control: its own intrinsic width
+   and height, and the value centred. In a two-column row that reads as one
+   wide button spanning the form rather than two fields matching the ones
+   above — which is exactly what it looked like. Strip the native appearance
+   so it sizes from the same box model as every other input. */
+input[type=date] {
+  -webkit-appearance: none;
+  appearance: none;
+  text-align: left;
+  /* Without this the intrinsic width wins and overflows its column, closing
+     up the gap between the two fields. */
+  max-width: 100%;
+}
+/* The value lives in a shadow element that does the centring, so aligning the
+   input alone leaves it centred. */
+input[type=date]::-webkit-date-and-time-value {
+  text-align: left;
+  margin: 0;
+}
+input[type=date]::-webkit-calendar-picker-indicator { opacity: .55; }
 .field-row { display: flex; gap: 12px; }
-.field-row .field { flex: 1; }
+/* min-width: 0 because a flex item defaults to min-width: auto and so refuses
+   to shrink below its content's intrinsic width. A date input's intrinsic
+   width is wide enough that the pair overflowed the screen instead of
+   splitting the row — which is what made them read as one oversized control. */
+.field-row .field { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* A longer label wraps to two lines and would otherwise push its own input
+   below its neighbour's. Letting the label absorb the extra height keeps both
+   inputs on one line — "Fertilize every (days)" wraps on a narrow phone and
+   "Water every (days)" doesn't. */
+.field-row .field > label { flex: 1 0 auto; }
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
