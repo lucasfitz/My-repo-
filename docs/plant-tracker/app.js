@@ -5,7 +5,7 @@
 // IndexedDB wrapper
 // ---------------------------------------------------------------------------
 const DB_NAME = "sprout-db";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 let _db = null;
 
 function openDB() {
@@ -28,6 +28,8 @@ function openDB() {
       if (!db.objectStoreNames.contains("outbox")) db.createObjectStore("outbox", { keyPath: "id" });
       // Species learned on demand, keyed like the built-in guide entries.
       if (!db.objectStoreNames.contains("species")) db.createObjectStore("species", { keyPath: "key" });
+      // Household preferences — one record, synced. See loadPrefs().
+      if (!db.objectStoreNames.contains("prefs")) db.createObjectStore("prefs", { keyPath: "id" });
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
@@ -73,10 +75,80 @@ async function removeRecord(store, id) {
 // more than four days, and no watering lands on a weekday morning.
 const state = { settings: { users: ["Lucas", "Kelly"], activeUser: "Lucas", lastNotified: "", waterDays: [0, 3], rooms: ["Living room", "Kitchen", "Bedroom", "Bathroom", "Office", "Porch"] } };
 
+/* Settings are split in two, because they aren't all the same kind of thing.
+
+   Device settings — the Anthropic key, the Supabase credentials, which of you
+   is using this phone — belong to the phone and must never go on the wire.
+   Household preferences — watering days, rooms, who lives here — are shared
+   decisions, and a shared garden where the two of you see different due dates
+   isn't shared at all.
+
+   So the household half lives in its own record that syncs like a plant does,
+   last-write-wins on updatedAt. `state.settings` stays the single runtime
+   view: device settings load first, the household record is layered on top. */
+const HOUSEHOLD_KEYS = ["waterDays", "rooms", "users"];
+const PREFS_ID = "household";
+// The shipped values, captured before any stored settings are layered on, so
+// "has this device got an opinion of its own?" can be answered later.
+const DEFAULT_PREFS = JSON.parse(JSON.stringify(
+  Object.fromEntries(HOUSEHOLD_KEYS.map(k => [k, state.settings[k]]))));
+
 async function loadSettings() {
   const row = await dbGet("settings", "main");
   if (row) state.settings = Object.assign(state.settings, row.value);
+  await loadPrefs();
   await migrateSettings();
+}
+
+// Layer the shared record over the device's own copy.
+async function loadPrefs() {
+  const prefs = await dbGet("prefs", PREFS_ID);
+  if (!prefs) return;
+  for (const k of HOUSEHOLD_KEYS) {
+    if (prefs[k] !== undefined) state.settings[k] = prefs[k];
+  }
+}
+
+/* Publish the household half. Called wherever one of those choices changes;
+   `saveSettings` also calls it, so nothing has to remember to. */
+async function savePrefs() {
+  const existing = await dbGet("prefs", PREFS_ID);
+
+  /* A device still on the factory defaults has nothing to say, and saying it
+     is actively harmful: joining a garden runs saveSettings to store the
+     connection, which would create a defaults record stamped now — newer than
+     the established phone's real one, so last-write-wins hands the household
+     a set of defaults and the joining phone never sees the real choices.
+     Silence until this device actually has an opinion. */
+  if (!existing && HOUSEHOLD_KEYS.every(k => sameValue(state.settings[k], DEFAULT_PREFS[k]))) return;
+
+  const rec = existing || { id: PREFS_ID };
+  let changed = false;
+  for (const k of HOUSEHOLD_KEYS) {
+    if (!sameValue(rec[k], state.settings[k])) { rec[k] = state.settings[k]; changed = true; }
+  }
+  // Only write when something actually differs: saveRecord stamps updatedAt and
+  // queues a push, so writing unconditionally would have the two phones
+  // ping-ponging an unchanged record every time either of them saved anything.
+  if (changed) await saveRecord("prefs", rec);
+}
+
+const sameValue = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/* A household record arriving from the other phone. The sync layer has already
+   decided it's newer, so adopt it and redraw — a watering day changed on
+   Kelly's phone should move the due dates here without a reload. */
+async function adoptRemotePrefs(rec) {
+  let changed = false;
+  for (const k of HOUSEHOLD_KEYS) {
+    if (rec[k] !== undefined && JSON.stringify(state.settings[k]) !== JSON.stringify(rec[k])) {
+      state.settings[k] = rec[k];
+      changed = true;
+    }
+  }
+  // Mirror into the device record so the value survives a restart offline.
+  if (changed) await dbPut("settings", { key: "main", value: state.settings });
+  return changed;
 }
 
 /* Saved settings shadow the defaults, so changing a default alone never
@@ -157,6 +229,8 @@ async function renameInHistory(renames) {
 }
 async function saveSettings() {
   await dbPut("settings", { key: "main", value: state.settings });
+  // Anything household-level in that save goes out to the other phone too.
+  await savePrefs();
   renderProfileChip();
 }
 function renderProfileChip() {
@@ -2738,6 +2812,12 @@ async function render() {
 // ---------------------------------------------------------------------------
 (async function boot() {
   await loadSettings();
+  /* Publish this device's household choices if it has any of its own and there
+     is no shared record yet — the case of a phone that has been in use since
+     before preferences synced. savePrefs stays silent on a device still on
+     defaults, which is what stops a joining phone from overwriting the real
+     settings with factory ones. */
+  await savePrefs();
   await loadLearnedSpecies();
   renderProfileChip();
 

@@ -15,7 +15,10 @@ const SYNC = {
 
 // "species" rides along: a species learned on one phone should not have to be
 // learned again on the other. Settings stay out — they hold the API key.
-const SYNC_STORES = ["plants", "logs", "tasks", "photos", "species"];
+// "prefs" carries the household's shared choices — watering days, rooms, who
+// lives here. "settings" stays out: it holds the API key and the credentials
+// for this connection, which belong to the device and nowhere else.
+const SYNC_STORES = ["plants", "logs", "tasks", "photos", "species", "prefs"];
 const PHOTO_BUCKET = "plant-photos";
 
 // Paste into Supabase > SQL Editor > Run. Safe to run more than once.
@@ -276,6 +279,10 @@ async function applyRemoteRow(row) {
     }
   }
   await dbPut(row.store, rec);
+  // Household preferences are the one synced store that also lives in memory:
+  // writing the record isn't enough, the running app has to pick it up or the
+  // watering days you changed on one phone won't move due dates on the other.
+  if (row.store === "prefs" && rec.id === PREFS_ID) await adoptRemotePrefs(rec);
   scheduleRemoteRender();
 }
 
