@@ -769,6 +769,84 @@ async function learnAndPick(query, row, pick) {
   }
 }
 
+/* Searching for what's actually written on the label.
+
+   Nursery tags and receipts read "Leucadendron Winter Red 5g" — genus,
+   cultivar, pot size. Matching contiguous substrings finds nothing for that,
+   even with Leucadendron sitting in the guide, because no entry contains the
+   whole string. Typing the label you were given is the most natural thing to
+   do and it was the one thing guaranteed to fail.
+
+   So: drop the sizing noise, then fall back from the whole phrase to its best
+   single word. */
+const SIZE_NOISE = /^(x{0,2}lg|lrg|sm|md|large|small|medium|gal|gallon|qt|quart|pot|pots|#\d+|\d+(\.\d+)?(g|gal|qt|l|d|cm|in|")?)$/;
+
+/* Words that are on half the labels in a plant shop and so narrow nothing.
+   Without this, "Weird alien plant" matches every entry with "Plant" in its
+   name — a page of noise where the honest answer is "not in the guide, shall
+   I look it up?". They still work inside a phrase: "Snake Plant" matches as a
+   whole string before any of this applies. */
+const GENERIC_WORDS = new Set([
+  "plant", "plants", "tree", "trees", "flower", "flowers", "seedling",
+  "indoor", "outdoor", "house", "houseplant", "live", "fresh", "assorted",
+  "mix", "mixed", "variety", "hanging", "basket", "potted", "starter",
+]);
+
+function searchTokens(q, { keepGeneric = false } = {}) {
+  return q.toLowerCase().split(/[^a-z0-9"']+/)
+    .filter(t => t && !SIZE_NOISE.test(t) && (keepGeneric || !GENERIC_WORDS.has(t)));
+}
+
+/* The label with the sizing stripped but the words and capitals left alone —
+   "Leucadendron Winter Red", not "leucadendron winter red 5g". This is what
+   gets shown and what a lookup is asked about, so it should read like the tag
+   the plant came with. */
+function cleanLabel(raw) {
+  return raw.trim().split(/\s+/)
+    .filter(w => !SIZE_NOISE.test(w.toLowerCase().replace(/[^a-z0-9#"]/g, "")))
+    .join(" ");
+}
+
+// With a few hundred species, filtering alone puts "Mini Monstera" above
+// "Monstera". Rank by how well the match starts, not just whether it matches.
+function rankPhrase(g, q) {
+  const name = g.name.toLowerCase(), latin = g.latin.toLowerCase();
+  if (!q) return 99;
+  if (name === q || latin === q) return 0;
+  if (name.startsWith(q)) return 1;
+  if (latin.startsWith(q)) return 2;
+  // A match at a word boundary beats one buried mid-word.
+  if (new RegExp("\\b" + q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(name)) return 3;
+  if (name.includes(q)) return 4;
+  if (latin.includes(q)) return 5;
+  return 99;
+}
+
+function rankSpecies(g, raw) {
+  const tokens = searchTokens(raw);
+  if (!tokens.length) return 99;
+  const phrase = rankPhrase(g, tokens.join(" "));
+  if (phrase < 99) return phrase;
+
+  /* No whole-phrase match, so try the words on their own. Short words are
+     skipped: matching "red" in "Leucadendron Winter Red" would put Red Maple
+     ahead of the plant actually in the pot.
+
+     Matching more of the words beats matching one of them better. "Echinopsis
+     San Pedro" hits the Echinopsis genus on one word and San Pedro Cactus on
+     two, and the specific plant is the right answer. Scored from 20 up so any
+     genuine phrase match still sorts first — this is a broader guess. */
+  let best = 99, matched = 0;
+  for (const t of tokens) {
+    if (t.length < 4) continue;
+    const r = rankPhrase(g, t);
+    if (r === 99) continue;
+    matched++;
+    best = Math.min(best, r);
+  }
+  return matched ? 20 + best - 5 * (matched - 1) : 99;
+}
+
 /* Species rows show a photograph of the plant, not a stand-in glyph. The
    image arrives after the row does, so each row renders a slot and gets
    filled as lookups land. Requests are aborted when the query moves on, and
@@ -1376,20 +1454,6 @@ async function viewAddEdit(editId = null) {
     showHint();
   };
 
-  // With a few hundred species, filtering alone puts "Mini Monstera" above
-  // "Monstera". Rank by how well the match starts, not just whether it matches.
-  const rankSpecies = (g, q) => {
-    const name = g.name.toLowerCase(), latin = g.latin.toLowerCase();
-    if (name === q) return 0;
-    if (name.startsWith(q)) return 1;
-    if (latin.startsWith(q)) return 2;
-    // A match at a word boundary beats one buried mid-word.
-    if (new RegExp("\\b" + q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(name)) return 3;
-    if (name.includes(q)) return 4;
-    if (latin.includes(q)) return 5;
-    return 99;
-  };
-
   sInput.addEventListener("input", () => {
     const q = sInput.value.trim().toLowerCase();
     if (!q) { sList.hidden = true; hint.textContent = ""; return; }
@@ -1400,15 +1464,19 @@ async function viewAddEdit(editId = null) {
       .sort((a, b) => a.rank - b.rank || a.g.name.localeCompare(b.g.name))
       .slice(0, 8)
       .map(x => x.g);
-    // Nothing in the guide is only a dead end if we leave it there — offer to
-    // go and find out. Also offered alongside weak matches, since searching
-    // "leucadendron" can surface something unrelated that merely contains the
-    // letters rather than the plant in hand.
-    const askRow = aiConfigured()
-      ? `<button type="button" class="ac-item ac-ask" data-ask="${esc(sInput.value.trim())}">
+    /* Nothing in the guide is only a dead end if we leave it there — offer to
+       go and find out. Offered alongside weak matches too: typing a cultivar
+       that only matched its genus is exactly when the exact plant is worth
+       looking up.
+
+       The lookup uses the cleaned name — "Leucadendron Winter Red", not
+       "Leucadendron Winter Red 5g". The pot size isn't part of the plant. */
+    const cleaned = cleanLabel(sInput.value);
+    const askRow = aiConfigured() && cleaned
+      ? `<button type="button" class="ac-item ac-ask" data-ask="${esc(cleaned)}">
            <span class="ac-ask-icon">✦</span>
-           <span><b>Look up "${esc(sInput.value.trim())}"</b><br>
-           <span class="ac-ask-sub">Not in the guide — ask Claude for its care, and keep it</span></span>
+           <span><b>Look up "${esc(cleaned)}"</b><br>
+           <span class="ac-ask-sub">Ask Claude for its care, and keep it in the guide</span></span>
          </button>`
       : "";
     sList.innerHTML = hits.length
