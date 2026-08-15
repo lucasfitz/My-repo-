@@ -2926,8 +2926,22 @@ function setTopbarMode(onPlant) {
   }
 }
 
+/* Scrolling to the top belongs to navigation, not to redrawing.
+
+   Everything on Today re-renders the whole view — ticking a task, watering a
+   plant, a sync landing — and each one used to throw you back to the top. Ten
+   items down the agenda, that makes the list unusable: you finish something
+   and have to find your place again.
+
+   So the jump only happens when the route actually changes. A redraw of the
+   screen you're already on puts you back where you were. */
+let renderedHash = null;
+
 async function render() {
   const hash = location.hash || "#/today";
+  const sameScreen = hash === renderedHash;
+  const keepAt = sameScreen ? window.scrollY : 0;
+  renderedHash = hash;
   const route = routes.find(r => r.re.test(hash)) || routes[0];
   const m = hash.match(route.re);
   const onPlant = /^#\/plant\//.test(hash);
@@ -2942,7 +2956,9 @@ async function render() {
   } catch (err) {
     $view().innerHTML = `<div class="empty"><div class="big">·</div><p>Something went wrong.<br>${esc(err.message)}</p></div>`;
   }
-  window.scrollTo(0, 0);
+  // After the content is in place: restoring first would be clamped against
+  // the old height.
+  window.scrollTo(0, keepAt);
 }
 
 // ---------------------------------------------------------------------------
