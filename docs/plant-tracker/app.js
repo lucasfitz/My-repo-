@@ -702,57 +702,147 @@ async function viewToday() {
     return `<h2>${title}</h2>${items.join("")}`;
   };
 
-  /* Everything due, grouped by room.
+  /* One agenda: room by room, plant by plant.
 
-     Splitting the list into Overdue and Due today sorts by urgency, but you
-     don't water by urgency — you pick up the can and walk a room at a time,
-     and that split sent you through the same doorway twice. Room is the
-     primary grouping; urgency survives as ordering and as the red label each
-     overdue row already carries.
+     Care tasks, the household checklist and the plants needing a look used to
+     be three lists in three places, so knowing what to do meant reading all of
+     them and holding the overlap in your head. They are the same question —
+     what needs doing — and they are answered together here, in the order you
+     would physically walk it.
 
-     Rooms are ordered by the most overdue thing in them, so the room that
-     needs you most is the one you start in. */
-  const roomSections = async () => {
-    const due = [...overdue, ...dueToday];
-    if (!due.length) return "";
+     Ordering carries the urgency the old headings used to: rooms worst-first,
+     plants worst-first inside a room, and within a plant the overdue watering
+     above the note someone left. */
+  const AGENDA_ORDER = { care: 0, health: 0.5, task: 1 };
 
-    const byRoom = new Map();
-    for (const t of due) {
-      const room = (t.plant.location || "").trim() || NO_ROOM;
-      if (!byRoom.has(room)) byRoom.set(room, []);
-      byRoom.get(room).push(t);
+  const agendaRow = (r) => {
+    if (r.kind === "care") {
+      const verb = r.t.kind === "water" ? "Water" : "Fertilize";
+      const icon = r.t.kind === "water" ? "💧" : "🌾";
+      return `
+        <div class="ag-row" data-plant="${r.t.plant.id}" data-kind="${r.t.kind}">
+          <button class="task-check" data-action="complete" aria-label="Mark ${verb.toLowerCase()} done">✓</button>
+          <div class="ag-main">
+            <div class="ag-title">${icon} ${verb}</div>
+            <div class="ag-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}${r.wxTag || ""}</div>
+          </div>
+        </div>`;
+    }
+    if (r.kind === "health") {
+      const step = (r.plant.health.actions || [])[0];
+      return `
+        <a class="ag-row ag-look" href="#/plant/${r.plant.id}">
+          <span class="ag-look-icon">${healthChip(r.plant.health)}</span>
+          <div class="ag-main">
+            <div class="ag-title">Needs a look</div>
+            <div class="ag-sub">${esc(step ? step.title : r.plant.health.summary)}</div>
+          </div>
+          <span class="task-go" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+          </span>
+        </a>`;
+    }
+    return `
+      <div class="ag-row" data-task="${r.task.id}">
+        <button class="task-check" data-action="toggle-task" aria-label="Mark done">✓</button>
+        <div class="ag-main">
+          <div class="ag-title">${esc(r.task.title)}</div>
+          <div class="ag-sub">${r.task.when ? esc(r.task.when) + " · " : ""}added by ${esc(r.task.by || "?")}</div>
+        </div>
+        <button class="ag-del" data-action="del-task" aria-label="Remove">✕</button>
+      </div>`;
+  };
+
+  const buildAgenda = () => {
+    const rows = [];
+    for (const t of care) {
+      if (t.delta > 0) continue;
+      let wxTag = "";
+      if (t.kind === "water" && isOutdoorPlant(t.plant)) {
+        if (wxFlags.rainToday) wxTag = ` · <span class="wx-tag">rain may cover this</span>`;
+        else if (wxFlags.hotToday) wxTag = ` · <span class="wx-tag hot">hot — don't skip</span>`;
+      }
+      rows.push({ kind: "care", t, wxTag, plant: t.plant, urgency: AGENDA_ORDER.care + Math.min(0, t.delta) });
+    }
+    for (const p of plants) {
+      if (p.archived || !p.health || typeof p.health.score !== "number" || p.health.score > 5) continue;
+      rows.push({ kind: "health", plant: p, urgency: AGENDA_ORDER.health });
+    }
+    const byId = new Map(plants.map(p => [p.id, p]));
+    for (const task of custom) {
+      if (task.done) continue;
+      rows.push({ kind: "task", task, plant: byId.get(task.plantId) || null, urgency: AGENDA_ORDER.task });
+    }
+    return rows;
+  };
+
+  /* Group into room → plant. A checklist item with no plant attached ("buy
+     potting soil") belongs to the household rather than to a room, so it
+     collects at the end instead of being filed under someone's guess. */
+  const LOOSE = "\u0000loose";
+  const agendaSections = async () => {
+    const rows = buildAgenda();
+    if (!rows.length) return "";
+
+    const rooms = new Map();
+    for (const r of rows) {
+      const room = r.plant ? ((r.plant.location || "").trim() || NO_ROOM) : LOOSE;
+      const pid = r.plant ? r.plant.id : LOOSE;
+      if (!rooms.has(room)) rooms.set(room, new Map());
+      const group = rooms.get(room);
+      if (!group.has(pid)) group.set(pid, { plant: r.plant, rows: [] });
+      group.get(pid).rows.push(r);
     }
 
-    // Nobody has set a room: a single "No room set" heading over the whole
-    // list is furniture, so fall back to the flat urgency split.
-    if (byRoom.size === 1 && byRoom.has(NO_ROOM)) {
-      return (await section("Overdue", overdue, "overdue"))
-        + (await section("Due today", dueToday, "due-today"));
-    }
-
-    const rooms = [...byRoom.keys()].sort((a, b) => {
+    const worst = list => Math.min(...list.map(r => r.urgency));
+    const roomWorst = g => Math.min(...[...g.values()].map(p => worst(p.rows)));
+    const order = [...rooms.keys()].sort((a, b) => {
+      if (a === LOOSE) return 1;
+      if (b === LOOSE) return -1;
       if (a === NO_ROOM) return 1;
       if (b === NO_ROOM) return -1;
-      const worst = r => Math.min(...byRoom.get(r).map(t => t.delta));
-      return worst(a) - worst(b) || a.localeCompare(b);
+      return roomWorst(rooms.get(a)) - roomWorst(rooms.get(b)) || a.localeCompare(b);
     });
 
+    /* If nobody has set a room, one "No room set" heading over the whole list
+       is furniture — show the plants on their own. A real room anywhere means
+       the headings are earning their place. */
+    const hasRealRoom = order.some(r => r !== NO_ROOM && r !== LOOSE);
+
     const out = [];
-    for (const room of rooms) {
-      const list = byRoom.get(room).sort((a, b) =>
-        a.delta - b.delta || a.plant.name.localeCompare(b.plant.name));
-      const late = list.filter(t => t.delta < 0).length;
-      const items = await Promise.all(list.map(t =>
-        renderCareTask(t, t.delta < 0 ? "overdue" : "due-today", { inRoom: room !== NO_ROOM })));
-      out.push(`
-        <div class="plant-group">
-          <div class="group-head">
-            <h2>${esc(room)}</h2>
-            <span class="group-count${late ? " is-late" : ""}">${
-              late ? `${late} overdue` : list.length}</span>
-          </div>
-          ${items.join("")}
-        </div>`);
+    for (const room of order) {
+      const group = rooms.get(room);
+      const plantsIn = [...group.values()].sort((a, b) =>
+        worst(a.rows) - worst(b.rows) ||
+        (a.plant ? a.plant.name : "").localeCompare(b.plant ? b.plant.name : ""));
+      const late = [...group.values()].flatMap(p => p.rows)
+        .filter(r => r.kind === "care" && r.t.delta < 0).length;
+      const total = [...group.values()].reduce((n, p) => n + p.rows.length, 0);
+
+      const cards = [];
+      for (const { plant, rows: prows } of plantsIn) {
+        prows.sort((a, b) => a.urgency - b.urgency);
+        const body = prows.map(agendaRow).join("");
+        if (!plant) { cards.push(`<div class="ag-plant">${body}</div>`); continue; }
+        const photo = await latestPhotoURL(plant.id);
+        cards.push(`
+          <div class="ag-plant">
+            <a class="ag-head" href="#/plant/${plant.id}">
+              ${photo ? `<img class="ag-thumb" src="${photo}" alt="">`
+                      : `<div class="ag-thumb ag-thumb-none">${plantEmoji(plant)}</div>`}
+              <span class="ag-name">${esc(plant.name)}</span>
+            </a>
+            ${body}
+          </div>`);
+      }
+
+      const head = (hasRealRoom || room === LOOSE)
+        ? `<div class="group-head">
+             <h2>${room === LOOSE ? "Anything else" : esc(room)}</h2>
+             <span class="group-count${late ? " is-late" : ""}">${late ? `${late} overdue` : total}</span>
+           </div>`
+        : "";
+      out.push(`<div class="plant-group">${head}${cards.join("")}</div>`);
     }
     return out.join("");
   };
@@ -768,7 +858,7 @@ async function viewToday() {
     </div>`;
   }
 
-  html += await roomSections();
+  html += await agendaSections();
 
   // Week-at-a-glance: which plants need water/fertilizer on each of the next 7 days
   if (plants.some(p => !p.archived)) {
@@ -785,58 +875,47 @@ async function viewToday() {
     html += `<h2>This week</h2><div class="card flat">${weekRows.join("")}</div>`;
   }
 
-  const ailing = plants
-    .filter(p => !p.archived && p.health && p.health.score <= 5)
-    .sort((a, b) => a.health.score - b.health.score);
-  if (ailing.length) {
-    html += `
-      <div class="section-head"><h2>Needs a look</h2></div>
-      <div class="card flat">
-        ${ailing.map(p => {
-          const step = (p.health.actions || [])[0];
-          return `<a class="ailing" href="#/plant/${p.id}">
-            ${healthChip(p.health)}
-            <div class="ailing-main">
-              <div class="ailing-name">${esc(p.name)}</div>
-              <div class="ailing-note">${esc(step ? step.title : p.health.summary)}</div>
-            </div>
-          </a>`;
-        }).join("")}
-      </div>`;
-  }
-
-  if (!care.length && !plants.length) {
+  if (!plants.some(p => !p.archived)) {
     html += `<div class="empty"><div class="big">🪴</div><p>No plants yet.<br>Tap <b>Add</b> to plant your first one.</p></div>`;
-  } else if (!overdue.length && !dueToday.length) {
-    html += `<div class="empty"><div class="big">✓</div><p>All caught up.</p></div>`;
+  } else if (!buildAgenda().length) {
+    html += `<div class="empty"><div class="big">✓</div><p>Nothing to do right now.</p></div>`;
   }
 
+  const doneTasks = custom.filter(t => t.done);
   html += `
-    <div class="section-head"><h2>Household checklist</h2></div>
-    ${custom.map(t => `
-      <div class="task" data-task="${t.id}">
-        <button class="task-check ${t.done ? "done" : ""}" data-action="toggle-task">✓</button>
-        <div class="task-body"><div class="task-title" style="${t.done ? "text-decoration:line-through;opacity:.55" : ""}">${esc(t.title)}</div>
-        <div class="task-sub">${t.plantName ? `${esc(t.plantName)} · ` : ""}${t.when ? `${esc(t.when)} · ` : ""}added by ${esc(t.by || "?")}</div></div>
-        <button class="btn small danger" data-action="del-task">✕</button>
-      </div>`).join("")}
-    <form id="addTaskForm" class="inline-form" style="margin-top:10px">
+    <form id="addTaskForm" class="inline-form" style="margin-top:22px">
       <input type="text" id="newTaskTitle" placeholder="Add a task… (buy potting soil)" maxlength="120">
       <button class="btn" type="submit">Add</button>
-    </form>`;
+    </form>
+    ${doneTasks.length ? `
+      <details class="ai-fold" style="margin-top:14px">
+        <summary class="ai-fold-head">
+          <span class="ai-fold-title">Done</span>
+          <span class="ai-fold-count">${doneTasks.length}</span>
+          <span class="ai-fold-chev" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 9.5l6 6 6-6"/></svg></span>
+        </summary>
+        <div class="ai-fold-body">
+          ${doneTasks.map(t => `
+            <div class="ag-row is-done" data-task="${t.id}">
+              <button class="task-check done" data-action="toggle-task" aria-label="Mark not done">✓</button>
+              <div class="ag-main"><div class="ag-title">${esc(t.title)}</div></div>
+              <button class="ag-del" data-action="del-task" aria-label="Remove">✕</button>
+            </div>`).join("")}
+        </div>
+      </details>` : ""}`;
 
   $view().innerHTML = html;
 
   $view().querySelectorAll("[data-action=complete]").forEach(btn => {
     btn.addEventListener("click", async e => {
-      const row = e.target.closest(".task");
+      const row = e.target.closest("[data-kind]");
       await logAction(row.dataset.plant, row.dataset.kind);
       render();
     });
   });
   $view().querySelectorAll("[data-action=toggle-task]").forEach(btn => {
     btn.addEventListener("click", async e => {
-      const id = e.target.closest(".task").dataset.task;
+      const id = e.target.closest("[data-task]").dataset.task;
       const t = await dbGet("tasks", id);
       t.done = !t.done;
       await saveRecord("tasks", t);
@@ -845,7 +924,7 @@ async function viewToday() {
   });
   $view().querySelectorAll("[data-action=del-task]").forEach(btn => {
     btn.addEventListener("click", async e => {
-      await removeRecord("tasks", e.target.closest(".task").dataset.task);
+      await removeRecord("tasks", e.target.closest("[data-task]").dataset.task);
       render();
     });
   });
