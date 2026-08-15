@@ -742,13 +742,20 @@ async function viewToday() {
           </span>
         </a>`;
     }
+    /* A step from a health check is a whole sentence — "Before each watering,
+       push a finger 2 inches into the soil…" — and a clipped instruction is
+       not an instruction. Two lines by default so the list still scans, and
+       the text is a button that opens the rest of it along with the reasoning
+       behind it. */
+    const more = !!r.task.detail;
     return `
       <div class="ag-row" data-task="${r.task.id}">
         <button class="task-check" data-action="toggle-task" aria-label="Mark done">✓</button>
-        <div class="ag-main">
+        <button type="button" class="ag-main ag-expand" data-action="expand" aria-expanded="false">
           <div class="ag-title">${esc(r.task.title)}</div>
+          ${more ? `<div class="ag-detail">${esc(r.task.detail)}</div>` : ""}
           <div class="ag-sub">${r.task.when ? esc(r.task.when) + " · " : ""}added by ${esc(r.task.by || "?")}</div>
-        </div>
+        </button>
         <button class="ag-del" data-action="del-task" aria-label="Remove">✕</button>
       </div>`;
   };
@@ -911,6 +918,14 @@ async function viewToday() {
       const row = e.target.closest("[data-kind]");
       await logAction(row.dataset.plant, row.dataset.kind);
       render();
+    });
+  });
+  /* Expanding is view-only: no record changes, so it re-renders nothing and
+     the row simply grows. */
+  $view().querySelectorAll("[data-action=expand]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const open = btn.closest(".ag-row").classList.toggle("is-open");
+      btn.setAttribute("aria-expanded", String(open));
     });
   });
   $view().querySelectorAll("[data-action=toggle-task]").forEach(btn => {
@@ -1863,6 +1878,10 @@ async function addStepAsTask(plant, action, taskId) {
   await saveRecord("tasks", {
     id: taskId,
     title: action.title,
+    // The step's reasoning was being dropped on the floor. A step reads as an
+    // instruction; the detail is why, and it's what you want when the
+    // instruction alone isn't obvious a week later.
+    detail: action.detail || "",
     done: false,
     by: "Sprout AI",
     plantId: plant.id,
