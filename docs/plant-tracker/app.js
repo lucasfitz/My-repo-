@@ -482,6 +482,27 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.hidden = true; }, 2200);
 }
+
+/* A tap you can feel. Android has navigator.vibrate; iPhone Safari has no
+   vibration API at all, but toggling a real switch control plays the OS's
+   switch haptic (iOS 17.4+) — one fixed tick, which is the entire vocabulary
+   available there. Browsers with neither toggle an invisible checkbox and
+   feel nothing, which is the right fallback: silence, not breakage. */
+let hapticSwitch = null;
+function buzz(pattern = 10) {
+  try {
+    if (navigator.vibrate && navigator.vibrate(pattern)) return;
+  } catch { /* blocked by permissions policy — fall through */ }
+  if (!hapticSwitch) {
+    const holder = document.createElement("label");
+    holder.setAttribute("aria-hidden", "true");
+    holder.style.cssText = "position:fixed;top:-40px;left:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none";
+    holder.innerHTML = `<input type="checkbox" switch tabindex="-1">`;
+    document.body.appendChild(holder);
+    hapticSwitch = holder.querySelector("input");
+  }
+  hapticSwitch.click();
+}
 /* The built-in guide plus everything learned on demand.
 
    PLANT_GUIDE ships with the app; LEARNED comes from the database and syncs
@@ -594,6 +615,8 @@ async function viewToday() {
   const care = computeCareTasks(plants);
   const overdue = care.filter(t => t.delta < 0);
   const dueToday = care.filter(t => t.delta === 0);
+  // Assessments from before steps landed automatically come through once here.
+  for (const p of plants) if (p.health && !p.health.tasked) await materializeHealthTasks(p);
   const custom = (await dbAll("tasks")).sort((a, b) => a.done - b.done || b.createdAt.localeCompare(a.createdAt));
 
   const greeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 18 ? "Good afternoon" : "Good evening";
@@ -687,8 +710,16 @@ async function viewToday() {
 
      Ordering carries the urgency the old headings used to: rooms worst-first,
      plants worst-first inside a room, and within a plant the overdue watering
-     above the note someone left. */
-  const AGENDA_ORDER = { care: 0, health: 0.5, task: 1 };
+     above the note someone left.
+
+     Everything dealt is doable today and clears with a tap — that is the
+     deck's contract. The goal of the screen is an empty deck by evening, so
+     nothing undated, unfinishable, or scheduled for another day gets a card:
+     a task due Thursday appears Thursday, a rotation resurfaces on its
+     rhythm, and the old "Needs a look" row (a link, not an action) is gone —
+     a struggling plant's card now carries the actual steps, because every
+     assessment materializes them onto the checklist itself. */
+  const AGENDA_ORDER = { care: 0, task: 1 };
 
   const buildAgenda = () => {
     const rows = [];
@@ -701,13 +732,10 @@ async function viewToday() {
       }
       rows.push({ kind: "care", t, wxTag, plant: t.plant, urgency: AGENDA_ORDER.care + Math.min(0, t.delta) });
     }
-    for (const p of plants) {
-      if (p.archived || !p.health || typeof p.health.score !== "number" || p.health.score > 5) continue;
-      rows.push({ kind: "health", plant: p, urgency: AGENDA_ORDER.health });
-    }
     const byId = new Map(plants.map(p => [p.id, p]));
     for (const task of custom) {
       if (task.done) continue;
+      if (task.due && task.due > todayStr()) continue; // its day hasn't come
       rows.push({ kind: "task", task, plant: byId.get(task.plantId) || null, urgency: AGENDA_ORDER.task });
     }
     return rows;
@@ -808,23 +836,21 @@ async function viewToday() {
           <span class="deck-tick">✓</span>
         </button>`;
       }
-      if (r.kind === "health") {
-        const step = (r.plant.health.actions || [])[0];
-        return `<a class="deck-act is-look" href="#/plant/${r.plant.id}">
-          <span class="deck-act-icon">${healthChip(r.plant.health)}</span>
-          <span class="deck-act-main"><b>Needs a look</b><span class="deck-act-sub">${esc(step ? step.title : r.plant.health.summary)}</span></span>
-          <span class="deck-go">›</span>
-        </a>`;
-      }
-      return `<button class="deck-act" data-do="${i}" data-task="${r.task.id}">
-        <span class="deck-act-icon">📝</span>
+      const act = `<button class="deck-act" data-do="${i}" data-task="${r.task.id}">
+        <span class="deck-act-icon">${r.task.by === "Sprout AI" ? (ACTION_ICONS[r.task.kind] || "✦") : "📝"}</span>
         <span class="deck-act-main"><b>${esc(r.task.title)}</b>${
-          r.task.detail ? `<span class="deck-act-sub">${esc(r.task.detail)}</span>` : ""}</span>
+          r.task.detail ? `<span class="deck-act-sub">${esc(r.task.detail)}</span>` : ""}${
+          r.task.repeatDays ? `<span class="deck-act-sub is-repeat">↻ every ${r.task.repeatDays}d — clears for today</span>` : ""}</span>
         <span class="deck-tick">✓</span>
       </button>`;
+      // A standing chore is never "done", so it never reaches the Done fold's
+      // ✕ — without its own way out it would repeat forever.
+      return r.task.repeatDays
+        ? `<div class="deck-act-wrap">${act}<button class="deck-drop" data-drop="${r.task.id}" aria-label="Stop repeating this">✕</button></div>`
+        : act;
     }).join("");
 
-    const doable = card.rows.filter(r => r.kind !== "health").length;
+    const doable = card.rows.length;
 
     return `
       <div class="deck-bar">
@@ -839,6 +865,8 @@ async function viewToday() {
 
       <div class="deck" id="deck">
         <div class="deck-card">
+          <span class="deck-stamp is-done" aria-hidden="true">✓ Done</span>
+          <span class="deck-stamp is-later" aria-hidden="true">Later</span>
           <div class="deck-photo">
             ${photo ? `<img src="${photo}" alt="">`
                     : `<div class="deck-photo-none">${card.plant ? plantEmoji(card.plant) : "📋"}</div>`}
@@ -858,19 +886,8 @@ async function viewToday() {
         <button class="btn secondary" id="deckSkip">Skip</button>
         ${doable ? `<button class="btn" id="deckAll">Did all ${doable > 1 ? doable : ""}</button>` : ""}
       </div>
-      <p class="deck-hint">Swipe the card to move on · swipe right when it's all done</p>`;
+      <p class="deck-hint">Swipe right when it's all done · left to come back to it</p>`;
   };
-
-  // Garden-wide AI advisor: Claude reasons over every plant's state + care + weather
-  if (aiConfigured() && plants.some(p => !p.archived)) {
-    html += `<div class="card flat">
-      <div class="section-head" style="margin:0">
-        <h2 style="margin:0">Sprout AI advisor</h2>
-        <button class="btn small secondary" id="btnGardenAi">Advise me</button>
-      </div>
-      <div id="gardenAiResult"></div>
-    </div>`;
-  }
 
   html += await cardStack();
 
@@ -909,9 +926,16 @@ async function viewToday() {
     for (let i = 0; i < 7; i++) {
       const list = i === 0 ? care.filter(t => t.delta <= 0) : care.filter(t => t.delta === i);
       const d = new Date(); d.setDate(d.getDate() + i);
+      const ds = addDays(todayStr(), i);
       const label = i === 0 ? "Today" : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+      // Scheduled checklist items too — a step that left today's deck for
+      // Thursday should be findable on Thursday, not just gone.
+      const dayTasks = custom.filter(t => !t.done && t.due &&
+        (i === 0 ? t.due <= ds : t.due === ds));
       const chips = list.map(t =>
-        `<span class="badge ${t.delta < 0 ? "overdue" : t.kind === "water" ? "water" : "fertilize"}">${esc(t.plant.name)}</span>`).join("");
+        `<span class="badge ${t.delta < 0 ? "overdue" : t.kind === "water" ? "water" : "fertilize"}">${esc(t.plant.name)}</span>`)
+        .concat(dayTasks.map(t =>
+          `<span class="badge chore">${esc(t.plantName || t.title)}</span>`)).join("");
       const wxLabel = wx ? weekWeatherLabel(wx, i) : "";
       weekRows.push(`<div class="week-row${i === 0 ? " today" : ""}"><div class="week-day">${label}</div><div class="week-chips">${chips || '<span class="week-none">—</span>'}</div>${wxLabel ? `<div class="week-wx">${wxLabel}</div>` : ""}</div>`);
     }
@@ -921,7 +945,7 @@ async function viewToday() {
   if (!plants.some(p => !p.archived)) {
     html += `<div class="empty"><div class="big">🪴</div><p>No plants yet.<br>Tap <b>Add</b> to plant your first one.</p></div>`;
   } else if (!buildAgenda().length) {
-    html += `<div class="empty"><div class="big">✓</div><p>Nothing to do right now.</p></div>`;
+    html += `<div class="empty"><div class="big">✓</div><p>All clear for today.<br>Nothing to do until tomorrow's cards.</p></div>`;
   }
 
   const doneTasks = custom.filter(t => t.done);
@@ -966,6 +990,9 @@ async function viewToday() {
     await render();
     const bar = $view().querySelector(".deck-bar");
     if (bar && bar.getBoundingClientRect().top < 0) bar.scrollIntoView({ block: "start" });
+    // The next card arrives like it was dealt, not like the page blinked.
+    const fresh = $view().querySelector(".deck-card");
+    if (fresh) fresh.classList.add("deal-in");
   };
 
   const deckSkip = document.getElementById("deckSkip");
@@ -977,7 +1004,14 @@ async function viewToday() {
     if (el.dataset.plant) await logAction(el.dataset.plant, el.dataset.kind);
     else if (el.dataset.task) {
       const t = await dbGet("tasks", el.dataset.task);
-      if (t) { t.done = true; await saveRecord("tasks", t); }
+      if (!t) return;
+      // A standing chore clears for today and books itself back in — done
+      // would end it, and deleting it is what the ✕ on the list is for.
+      if (t.repeatDays > 0) {
+        t.due = addDays(todayStr(), t.repeatDays);
+        toast(`Done — back on ${fmtDate(t.due)}`);
+      } else t.done = true;
+      await saveRecord("tasks", t);
     }
   };
   const doAll = async () => {
@@ -986,30 +1020,86 @@ async function viewToday() {
   };
 
   $view().querySelectorAll(".deck-act[data-do]").forEach(el => {
-    el.addEventListener("click", async () => { await doAct(el); await nextCard(); });
+    el.addEventListener("click", async () => { buzz(8); await doAct(el); await nextCard(); });
   });
   const deckAll = document.getElementById("deckAll");
-  if (deckAll) deckAll.addEventListener("click", doAll);
+  if (deckAll) deckAll.addEventListener("click", () => { buzz([12, 40, 12]); doAll(); });
 
-  /* Swipe the card the way the screen it resembles is swiped: away to move on,
-     right to say it's all handled. Same thresholds as the plant screen, so a
-     scroll is never mistaken for a decision. */
+  $view().querySelectorAll(".deck-drop[data-drop]").forEach(el => {
+    el.addEventListener("click", async () => {
+      await removeRecord("tasks", el.dataset.drop);
+      toast("Okay — it won't come back");
+      nextCard();
+    });
+  });
+
+  /* The card follows the finger.
+
+     A swipe that only registers on release reads as a button you can't see;
+     dragging the card itself, with the stamp fading in and a tick at the
+     point of no return, is the gesture saying what it will do before it does
+     it. Left files the card for later, right marks everything on it done —
+     same meanings the release-only version had.
+
+     touch-action: pan-y leaves vertical scrolling native, so the gesture is
+     only claimed once it is clearly horizontal, and a scroll that drifts
+     sideways never moves the card. */
   const deck = document.getElementById("deck");
-  if (deck) {
-    let sx = 0, sy = 0, tracking = false;
+  const cardEl = deck && deck.querySelector(".deck-card");
+  if (cardEl) {
+    const stampDone = cardEl.querySelector(".deck-stamp.is-done");
+    const stampLater = cardEl.querySelector(".deck-stamp.is-later");
+    const COMMIT = Math.min(120, Math.round(deck.clientWidth * 0.34)) || 100;
+    let sx = 0, sy = 0, dx = 0, mode = null, armed = false;
+
+    const follow = x => {
+      cardEl.style.transform = x ? `translateX(${x}px) rotate(${(x / 22).toFixed(2)}deg)` : "";
+      const p = Math.min(1, Math.abs(x) / COMMIT);
+      stampDone.style.opacity = x > 0 ? p : 0;
+      stampLater.style.opacity = x < 0 ? p : 0;
+    };
+    const settle = () => {
+      cardEl.style.transition = "transform .3s cubic-bezier(.2,.9,.3,1.18)";
+      follow(0);
+    };
+
     deck.addEventListener("touchstart", e => {
-      tracking = e.touches.length === 1;
-      if (tracking) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }
+      if (e.touches.length !== 1) { mode = "scroll"; return; }
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+      dx = 0; mode = null; armed = false;
+      cardEl.style.transition = "none";
     }, { passive: true });
-    deck.addEventListener("touchend", async e => {
-      if (!tracking) return;
-      tracking = false;
-      const t = e.changedTouches[0];
-      const dx = t.clientX - sx, dy = t.clientY - sy;
-      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
-      deck.classList.add(dx < 0 ? "fly-left" : "fly-right");
-      await new Promise(r => setTimeout(r, 180));
-      if (dx > 0) await doAll();
+
+    deck.addEventListener("touchmove", e => {
+      if (mode === "scroll") return;
+      const t = e.touches[0];
+      dx = t.clientX - sx;
+      const dy = t.clientY - sy;
+      if (mode === null) {
+        if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { mode = "scroll"; return; }
+        if (Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy) * 1.2) mode = "drag";
+        else return;
+      }
+      follow(dx);
+      // One tick at the threshold, like a switch — and it un-arms if the
+      // finger retreats, so hovering on the line doesn't rattle.
+      if (!armed && Math.abs(dx) >= COMMIT) { armed = true; buzz(8); }
+      else if (armed && Math.abs(dx) < COMMIT) armed = false;
+    }, { passive: true });
+
+    deck.addEventListener("touchcancel", () => { if (mode === "drag") settle(); mode = null; }, { passive: true });
+
+    deck.addEventListener("touchend", async () => {
+      if (mode !== "drag") { mode = null; return; }
+      mode = null;
+      if (Math.abs(dx) < COMMIT) { settle(); return; }
+      const dir = dx > 0 ? 1 : -1;
+      cardEl.style.transition = "transform .22s ease-in, opacity .22s ease-in";
+      cardEl.style.transform = `translateX(${dir * 120}%) rotate(${dir * 9}deg)`;
+      cardEl.style.opacity = "0";
+      buzz(dir > 0 ? [12, 40, 12] : 8);
+      await new Promise(r => setTimeout(r, 210));
+      if (dir > 0) await doAll();
       else { todayIndex++; await nextCard(); }
     }, { passive: true });
   }
@@ -1044,21 +1134,6 @@ async function viewToday() {
       render();
     });
   });
-  const btnGardenAi = document.getElementById("btnGardenAi");
-  if (btnGardenAi) btnGardenAi.addEventListener("click", async () => {
-    const box = document.getElementById("gardenAiResult");
-    btnGardenAi.disabled = true;
-    btnGardenAi.textContent = "Thinking…";
-    try {
-      box.innerHTML = renderGardenInsights(await aiGardenInsights());
-    } catch (err) {
-      box.innerHTML = `<p class="subtitle" style="margin-top:10px">⚠️ ${esc(err.message)}</p>`;
-    } finally {
-      btnGardenAi.disabled = false;
-      btnGardenAi.textContent = "Advise me";
-    }
-  });
-
   document.getElementById("addTaskForm").addEventListener("submit", async e => {
     e.preventDefault();
     const title = document.getElementById("newTaskTitle").value.trim();
@@ -1973,8 +2048,15 @@ async function viewAddEdit(editId = null) {
   }
 }
 
-// A recommendation is only worth anything if acting on it is one tap. "Add
-// step" puts it on the shared checklist; "Apply" rewrites the care plan itself.
+/* When a recommended step is due, as a date. New assessments say it in days;
+   ones stored before the schema learned to schedule only had a phrase. */
+function actionSchedule(action) {
+  const dueIn = Number.isInteger(action.due_in_days) ? Math.max(0, action.due_in_days)
+    : action.when === "this week" ? 2 : 0;
+  const repeat = Number.isInteger(action.repeat_every_days) ? Math.max(0, action.repeat_every_days) : 0;
+  return { due: addDays(todayStr(), dueIn), repeatDays: repeat };
+}
+
 async function addStepAsTask(plant, action, taskId) {
   await saveRecord("tasks", {
     id: taskId,
@@ -1985,11 +2067,40 @@ async function addStepAsTask(plant, action, taskId) {
     detail: action.detail || "",
     done: false,
     by: "Sprout AI",
+    kind: action.kind || "",
     plantId: plant.id,
     plantName: plant.name,
-    when: action.when,
+    ...actionSchedule(action),
     createdAt: new Date().toISOString(),
   });
+}
+
+/* Recommendations arrive on their own.
+
+   A health check's steps used to wait behind an "Add step" tap on the plant
+   page — advice that was easy to never see again. Now every assessment's
+   steps land on the checklist themselves, each due on its scheduled day, and
+   the deck deals them when that day comes.
+
+   `tasked` on the health object makes this once-per-assessment: without it, a
+   completed or deleted step would be resurrected on the next render. The flag
+   rides the plant record through sync, and the deterministic task ids mean
+   two phones materializing the same assessment write the same rows rather
+   than duplicates. Assessments older than a week (from before this existed,
+   or a phone that was off) are flagged without creating anything — week-old
+   advice flooding today's deck helps nobody. */
+async function materializeHealthTasks(plant) {
+  const h = plant.health;
+  if (!h || !Array.isArray(h.actions) || h.tasked) return;
+  h.tasked = true;
+  const fresh = h.at && Date.now() - Date.parse(h.at) < 7 * DAY;
+  if (fresh) {
+    for (let i = 0; i < h.actions.length; i++) {
+      const id = actionTaskId(plant.id, h.at, i);
+      if (!(await dbGet("tasks", id))) await addStepAsTask(plant, h.actions[i], id);
+    }
+  }
+  await saveRecord("plants", plant);
 }
 
 async function applyStepToPlan(plant, action) {
@@ -2351,6 +2462,16 @@ async function viewGuide() {
       : `Suggested schedules & tips for ${allSpecies().length - 1} common houseplants.`}</p>
     <div class="tip-card">${SEASONAL_TIPS[season]}</div>
 
+    ${aiConfigured() && owned.size ? `
+    <div class="card flat">
+      <div class="section-head" style="margin:0">
+        <h2 style="margin:0">Sprout AI advisor</h2>
+        <button class="btn small secondary" id="btnGardenAi">Advise me</button>
+      </div>
+      <p class="subtitle" style="margin:6px 0 0">Reads every plant's state, care history and the weather, and says what the collection needs. It lives here because it's reading, not doing — Today only deals what can be done and cleared.</p>
+      <div id="gardenAiResult"></div>
+    </div>` : ""}
+
     ${mine.length ? `
       <div class="section-head"><h2>Your plants</h2></div>
       ${mine.map(o => card(o.g, o.plants)).join("")}
@@ -2364,6 +2485,21 @@ async function viewGuide() {
     <div class="search-bar"><input type="text" id="guideSearch" placeholder="Search ${allSpecies().length - 1} species…"></div>
     <div id="guideAll" hidden></div>
     <button class="btn block secondary" id="guideBrowse">Browse all ${allSpecies().length - 1} species</button>`;
+
+  const btnGardenAi = document.getElementById("btnGardenAi");
+  if (btnGardenAi) btnGardenAi.addEventListener("click", async () => {
+    const box = document.getElementById("gardenAiResult");
+    btnGardenAi.disabled = true;
+    btnGardenAi.textContent = "Thinking…";
+    try {
+      box.innerHTML = renderGardenInsights(await aiGardenInsights());
+    } catch (err) {
+      box.innerHTML = `<p class="subtitle" style="margin-top:10px">⚠️ ${esc(err.message)}</p>`;
+    } finally {
+      btnGardenAi.disabled = false;
+      btnGardenAi.textContent = "Advise me";
+    }
+  });
 
   const all = document.getElementById("guideAll");
   const browse = document.getElementById("guideBrowse");
