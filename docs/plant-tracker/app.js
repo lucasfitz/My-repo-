@@ -279,6 +279,9 @@ function dueLabel(dueStr) {
 
    Empty means no batching — every plant on its own natural day. */
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+// Where plants without a room land. Shared so the Today and Plants tabs agree,
+// and so it sorts last in both.
+const NO_ROOM = "No room set";
 
 function waterDays() {
   const d = state.settings.waterDays;
@@ -667,7 +670,9 @@ async function viewToday() {
     }
   }
 
-  const renderCareTask = async (t, cls) => {
+  // `inRoom`: the room is already the heading above, so repeating it on every
+  // row is noise.
+  const renderCareTask = async (t, cls, { inRoom = false } = {}) => {
     const photo = await latestPhotoURL(t.plant.id);
     const icon = t.kind === "water" ? "💧" : "🌾";
     const verb = t.kind === "water" ? "Water" : "Fertilize";
@@ -683,7 +688,7 @@ async function viewToday() {
         ${photo ? `<img class="task-thumb" src="${photo}" alt="">` : `<div class="task-thumb" style="display:grid;place-items:center">${plantEmoji(t.plant)}</div>`}
         <div class="task-body">
           <div class="task-title">${verb} ${esc(t.plant.name)}</div>
-          <div class="task-sub">${esc(t.plant.location || "")}${t.plant.location ? " · " : ""}${dueLabel(t.due)}${wxTag}</div>
+          <div class="task-sub">${!inRoom && t.plant.location ? esc(t.plant.location) + " · " : ""}${dueLabel(t.due)}${wxTag}</div>
         </div>
         <a class="task-go" href="#/plant/${t.plant.id}" aria-label="Open ${esc(t.plant.name)}">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
@@ -697,6 +702,61 @@ async function viewToday() {
     return `<h2>${title}</h2>${items.join("")}`;
   };
 
+  /* Everything due, grouped by room.
+
+     Splitting the list into Overdue and Due today sorts by urgency, but you
+     don't water by urgency — you pick up the can and walk a room at a time,
+     and that split sent you through the same doorway twice. Room is the
+     primary grouping; urgency survives as ordering and as the red label each
+     overdue row already carries.
+
+     Rooms are ordered by the most overdue thing in them, so the room that
+     needs you most is the one you start in. */
+  const roomSections = async () => {
+    const due = [...overdue, ...dueToday];
+    if (!due.length) return "";
+
+    const byRoom = new Map();
+    for (const t of due) {
+      const room = (t.plant.location || "").trim() || NO_ROOM;
+      if (!byRoom.has(room)) byRoom.set(room, []);
+      byRoom.get(room).push(t);
+    }
+
+    // Nobody has set a room: a single "No room set" heading over the whole
+    // list is furniture, so fall back to the flat urgency split.
+    if (byRoom.size === 1 && byRoom.has(NO_ROOM)) {
+      return (await section("Overdue", overdue, "overdue"))
+        + (await section("Due today", dueToday, "due-today"));
+    }
+
+    const rooms = [...byRoom.keys()].sort((a, b) => {
+      if (a === NO_ROOM) return 1;
+      if (b === NO_ROOM) return -1;
+      const worst = r => Math.min(...byRoom.get(r).map(t => t.delta));
+      return worst(a) - worst(b) || a.localeCompare(b);
+    });
+
+    const out = [];
+    for (const room of rooms) {
+      const list = byRoom.get(room).sort((a, b) =>
+        a.delta - b.delta || a.plant.name.localeCompare(b.plant.name));
+      const late = list.filter(t => t.delta < 0).length;
+      const items = await Promise.all(list.map(t =>
+        renderCareTask(t, t.delta < 0 ? "overdue" : "due-today", { inRoom: room !== NO_ROOM })));
+      out.push(`
+        <div class="plant-group">
+          <div class="group-head">
+            <h2>${esc(room)}</h2>
+            <span class="group-count${late ? " is-late" : ""}">${
+              late ? `${late} overdue` : list.length}</span>
+          </div>
+          ${items.join("")}
+        </div>`);
+    }
+    return out.join("");
+  };
+
   // Garden-wide AI advisor: Claude reasons over every plant's state + care + weather
   if (aiConfigured() && plants.some(p => !p.archived)) {
     html += `<div class="card flat">
@@ -708,8 +768,7 @@ async function viewToday() {
     </div>`;
   }
 
-  html += await section("Overdue", overdue, "overdue");
-  html += await section("Due today", dueToday, "due-today");
+  html += await roomSections();
 
   // Week-at-a-glance: which plants need water/fertilizer on each of the next 7 days
   if (plants.some(p => !p.archived)) {
@@ -1008,11 +1067,11 @@ async function viewPlants() {
     // Ungrouped plants go last under their own heading rather than vanishing.
     const byRoom = {};
     plants.forEach((p, i) => {
-      const room = (p.location || "").trim() || "No room set";
+      const room = (p.location || "").trim() || NO_ROOM;
       (byRoom[room] = byRoom[room] || []).push(cards[i]);
     });
     const rooms = Object.keys(byRoom).sort((a, b) =>
-      a === "No room set" ? 1 : b === "No room set" ? -1 : a.localeCompare(b));
+      a === NO_ROOM ? 1 : b === NO_ROOM ? -1 : a.localeCompare(b));
     html += rooms.map(room => `
       <div class="plant-group" data-room="${esc(room.toLowerCase())}">
         <div class="group-head"><h2>${esc(room)}</h2><span class="group-count">${byRoom[room].length}</span></div>

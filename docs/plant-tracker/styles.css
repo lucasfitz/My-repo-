@@ -586,6 +586,9 @@ body.sheet-open { overflow: hidden; }
   font-size: 12px; font-weight: 620; color: var(--ink-2);
   background: var(--surface-sunk); border-radius: var(--r-pill); padding: 2px 9px;
 }
+/* A room carrying something overdue says so on the heading, so the count is
+   worth reading rather than just a tally. */
+.group-count.is-late { color: var(--alert); background: var(--alert-bg); }
 
 .pot-mate { display: flex; align-items: center; gap: 12px; padding: 9px 0; }
 .pot-mate + .pot-mate { border-top: 1px solid var(--hairline); }
