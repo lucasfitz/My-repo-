@@ -622,31 +622,6 @@ async function viewToday() {
       ${wxCorner}
     </div>`;
 
-  // One card for how the collection is doing, replacing the three loose stats
-  // and the seasonal message.
-  if (gh.total) {
-    html += `
-      <div class="card flat garden-card">
-        <div class="garden-main">
-          <div class="garden-figure">
-            <div class="garden-score">${gh.avg === null ? "—" : gh.avg.toFixed(1)}</div>
-            <div class="garden-band">${gh.avg === null ? "Not checked yet" : esc(gh.band)}</div>
-          </div>
-          ${spark || ""}
-        </div>
-        <div class="garden-stats">
-          <span><b>${gh.total}</b> plant${gh.total === 1 ? "" : "s"}</span>
-          <span class="${overdue.length ? "is-overdue" : ""}"><b>${overdue.length}</b> overdue</span>
-          <span><b>${dueToday.length}</b> due today</span>
-          ${gh.avg === null
-            ? `<span class="garden-muted">no health checks yet</span>`
-            : gh.scored < gh.total
-              ? `<span class="garden-muted">${gh.scored} of ${gh.total} checked</span>`
-              : ""}
-        </div>
-      </div>`;
-  }
-
   // Porch weather: live conditions + advice for outdoor plants
   if (hasOutdoor) {
     if (!weatherConfigured()) {
@@ -715,51 +690,6 @@ async function viewToday() {
      above the note someone left. */
   const AGENDA_ORDER = { care: 0, health: 0.5, task: 1 };
 
-  const agendaRow = (r) => {
-    if (r.kind === "care") {
-      const verb = r.t.kind === "water" ? "Water" : "Fertilize";
-      const icon = r.t.kind === "water" ? "💧" : "🌾";
-      return `
-        <div class="ag-row" data-plant="${r.t.plant.id}" data-kind="${r.t.kind}">
-          <button class="task-check" data-action="complete" aria-label="Mark ${verb.toLowerCase()} done">✓</button>
-          <div class="ag-main">
-            <div class="ag-title">${icon} ${verb}</div>
-            <div class="ag-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}${r.wxTag || ""}</div>
-          </div>
-        </div>`;
-    }
-    if (r.kind === "health") {
-      const step = (r.plant.health.actions || [])[0];
-      return `
-        <a class="ag-row ag-look" href="#/plant/${r.plant.id}">
-          <span class="ag-look-icon">${healthChip(r.plant.health)}</span>
-          <div class="ag-main">
-            <div class="ag-title">Needs a look</div>
-            <div class="ag-sub">${esc(step ? step.title : r.plant.health.summary)}</div>
-          </div>
-          <span class="task-go" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
-          </span>
-        </a>`;
-    }
-    /* A step from a health check is a whole sentence — "Before each watering,
-       push a finger 2 inches into the soil…" — and a clipped instruction is
-       not an instruction. Two lines by default so the list still scans, and
-       the text is a button that opens the rest of it along with the reasoning
-       behind it. */
-    const more = !!r.task.detail;
-    return `
-      <div class="ag-row" data-task="${r.task.id}">
-        <button class="task-check" data-action="toggle-task" aria-label="Mark done">✓</button>
-        <button type="button" class="ag-main ag-expand" data-action="expand" aria-expanded="false">
-          <div class="ag-title">${esc(r.task.title)}</div>
-          ${more ? `<div class="ag-detail">${esc(r.task.detail)}</div>` : ""}
-          <div class="ag-sub">${r.task.when ? esc(r.task.when) + " · " : ""}added by ${esc(r.task.by || "?")}</div>
-        </button>
-        <button class="ag-del" data-action="del-task" aria-label="Remove">✕</button>
-      </div>`;
-  };
-
   const buildAgenda = () => {
     const rows = [];
     for (const t of care) {
@@ -787,71 +717,148 @@ async function viewToday() {
      potting soil") belongs to the household rather than to a room, so it
      collects at the end instead of being filed under someone's guess. */
   const LOOSE = "\u0000loose";
-  const agendaSections = async () => {
+
+  /* One plant at a time.
+
+     A list tells you everything at once, which is the right shape for
+     planning and the wrong one for doing. Working through a collection is a
+     sequence: stand in front of a plant, deal with it, move to the next. So
+     Today deals the work as a stack of cards — the plant you're looking at,
+     large enough to recognise from across the room, with its jobs as buttons
+     big enough to hit while holding a watering can.
+
+     The room picker filters the deck, because you work one room at a time and
+     the rest is noise while you're in it. */
+  const buildStack = () => {
     const rows = buildAgenda();
-    if (!rows.length) return "";
-
-    const rooms = new Map();
+    const byPlant = new Map();
     for (const r of rows) {
-      const room = r.plant ? ((r.plant.location || "").trim() || NO_ROOM) : LOOSE;
-      const pid = r.plant ? r.plant.id : LOOSE;
-      if (!rooms.has(room)) rooms.set(room, new Map());
-      const group = rooms.get(room);
-      if (!group.has(pid)) group.set(pid, { plant: r.plant, rows: [] });
-      group.get(pid).rows.push(r);
-    }
-
-    const worst = list => Math.min(...list.map(r => r.urgency));
-    const roomWorst = g => Math.min(...[...g.values()].map(p => worst(p.rows)));
-    const order = [...rooms.keys()].sort((a, b) => {
-      if (a === LOOSE) return 1;
-      if (b === LOOSE) return -1;
-      if (a === NO_ROOM) return 1;
-      if (b === NO_ROOM) return -1;
-      return roomWorst(rooms.get(a)) - roomWorst(rooms.get(b)) || a.localeCompare(b);
-    });
-
-    /* If nobody has set a room, one "No room set" heading over the whole list
-       is furniture — show the plants on their own. A real room anywhere means
-       the headings are earning their place. */
-    const hasRealRoom = order.some(r => r !== NO_ROOM && r !== LOOSE);
-
-    const out = [];
-    for (const room of order) {
-      const group = rooms.get(room);
-      const plantsIn = [...group.values()].sort((a, b) =>
-        worst(a.rows) - worst(b.rows) ||
-        (a.plant ? a.plant.name : "").localeCompare(b.plant ? b.plant.name : ""));
-      const late = [...group.values()].flatMap(p => p.rows)
-        .filter(r => r.kind === "care" && r.t.delta < 0).length;
-      const total = [...group.values()].reduce((n, p) => n + p.rows.length, 0);
-
-      const cards = [];
-      for (const { plant, rows: prows } of plantsIn) {
-        prows.sort((a, b) => a.urgency - b.urgency);
-        const body = prows.map(agendaRow).join("");
-        if (!plant) { cards.push(`<div class="ag-plant">${body}</div>`); continue; }
-        const photo = await latestPhotoURL(plant.id);
-        cards.push(`
-          <div class="ag-plant">
-            <a class="ag-head" href="#/plant/${plant.id}">
-              ${photo ? `<img class="ag-thumb" src="${photo}" alt="">`
-                      : `<div class="ag-thumb ag-thumb-none">${plantEmoji(plant)}</div>`}
-              <span class="ag-name">${esc(plant.name)}</span>
-            </a>
-            ${body}
-          </div>`);
+      const key = r.plant ? r.plant.id : LOOSE;
+      if (!byPlant.has(key)) {
+        byPlant.set(key, {
+          plant: r.plant,
+          room: r.plant ? ((r.plant.location || "").trim() || NO_ROOM) : LOOSE,
+          rows: [],
+        });
       }
-
-      const head = (hasRealRoom || room === LOOSE)
-        ? `<div class="group-head">
-             <h2>${room === LOOSE ? "Anything else" : esc(room)}</h2>
-             <span class="group-count${late ? " is-late" : ""}">${late ? `${late} overdue` : total}</span>
-           </div>`
-        : "";
-      out.push(`<div class="plant-group">${head}${cards.join("")}</div>`);
+      byPlant.get(key).rows.push(r);
     }
-    return out.join("");
+    const cards = [...byPlant.values()];
+    for (const c of cards) {
+      c.rows.sort((a, b) => a.urgency - b.urgency);
+      c.urgency = Math.min(...c.rows.map(r => r.urgency));
+    }
+    // Same order the list used: worst room first, worst plant inside it, and
+    // the unattached checklist last.
+    const roomWorst = new Map();
+    for (const c of cards) {
+      const cur = roomWorst.get(c.room);
+      if (cur === undefined || c.urgency < cur) roomWorst.set(c.room, c.urgency);
+    }
+    const rank = room => room === LOOSE ? 2 : room === NO_ROOM ? 1 : 0;
+    cards.sort((a, b) =>
+      rank(a.room) - rank(b.room) ||
+      roomWorst.get(a.room) - roomWorst.get(b.room) ||
+      a.room.localeCompare(b.room) ||
+      a.urgency - b.urgency ||
+      (a.plant ? a.plant.name : "").localeCompare(b.plant ? b.plant.name : ""));
+
+    /* Finishing a plant must not march you into another room while you are
+       still standing in this one. Ordering rooms by their worst plant is right
+       for the first deal and wrong from then on: watering the worst plant in
+       the room drops that room's rank and the deck jumps you elsewhere with
+       its neighbour still unwatered. So the room you're working stays at the
+       front until it's clear. Stable sort, so everything else holds. */
+    if (todayLastRoom && cards.some(c => c.room === todayLastRoom)) {
+      cards.sort((a, b) => (a.room === todayLastRoom ? 0 : 1) - (b.room === todayLastRoom ? 0 : 1));
+    }
+    return cards;
+  };
+
+  const roomLabel = room => room === LOOSE ? "Anything else" : room;
+
+  const cardStack = async () => {
+    const all = buildStack();
+    if (!all.length) return "";
+
+    // Rooms offered are the ones with work in them — a picker listing rooms
+    // that need nothing is a list of dead ends.
+    const rooms = [];
+    for (const c of all) if (!rooms.includes(c.room)) rooms.push(c.room);
+    if (todayRoom && !rooms.includes(todayRoom)) todayRoom = "";
+
+    const deck = todayRoom ? all.filter(c => c.room === todayRoom) : all;
+    if (!deck.length) return "";
+    if (todayIndex >= deck.length) todayIndex = 0;
+    if (todayIndex < 0) todayIndex = deck.length - 1;
+    const card = deck[todayIndex];
+    todayLastRoom = card.room;
+
+    const late = card.rows.filter(r => r.kind === "care" && r.t.delta < 0);
+    const worst = late.length ? Math.min(...late.map(r => r.t.delta)) : null;
+    const photo = card.plant ? await latestPhotoURL(card.plant.id) : null;
+    const g = card.plant ? guideEntry(card.plant.speciesKey) : null;
+
+    const actions = card.rows.map((r, i) => {
+      if (r.kind === "care") {
+        const verb = r.t.kind === "water" ? "Water" : "Fertilize";
+        return `<button class="deck-act" data-do="${i}" data-plant="${r.t.plant.id}" data-kind="${r.t.kind}">
+          <span class="deck-act-icon">${r.t.kind === "water" ? "💧" : "🌾"}</span>
+          <span class="deck-act-main"><b>${verb}</b><span class="deck-act-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}</span></span>
+          <span class="deck-tick">✓</span>
+        </button>`;
+      }
+      if (r.kind === "health") {
+        const step = (r.plant.health.actions || [])[0];
+        return `<a class="deck-act is-look" href="#/plant/${r.plant.id}">
+          <span class="deck-act-icon">${healthChip(r.plant.health)}</span>
+          <span class="deck-act-main"><b>Needs a look</b><span class="deck-act-sub">${esc(step ? step.title : r.plant.health.summary)}</span></span>
+          <span class="deck-go">›</span>
+        </a>`;
+      }
+      return `<button class="deck-act" data-do="${i}" data-task="${r.task.id}">
+        <span class="deck-act-icon">📝</span>
+        <span class="deck-act-main"><b>${esc(r.task.title)}</b>${
+          r.task.detail ? `<span class="deck-act-sub">${esc(r.task.detail)}</span>` : ""}</span>
+        <span class="deck-tick">✓</span>
+      </button>`;
+    }).join("");
+
+    const doable = card.rows.filter(r => r.kind !== "health").length;
+
+    return `
+      <div class="deck-bar">
+        ${rooms.length > 1 ? `
+        <select id="deckRoom" class="deck-room" aria-label="Room">
+          <option value=""${todayRoom ? "" : " selected"}>All rooms · ${all.length}</option>
+          ${rooms.map(r => `<option value="${esc(r)}"${todayRoom === r ? " selected" : ""}>${
+            esc(roomLabel(r))} · ${all.filter(c => c.room === r).length}</option>`).join("")}
+        </select>` : `<span class="deck-only-room">${esc(roomLabel(rooms[0]))}</span>`}
+        <span class="deck-count">${todayIndex + 1} of ${deck.length}</span>
+      </div>
+
+      <div class="deck" id="deck">
+        <div class="deck-card">
+          <div class="deck-photo">
+            ${photo ? `<img src="${photo}" alt="">`
+                    : `<div class="deck-photo-none">${card.plant ? plantEmoji(card.plant) : "📋"}</div>`}
+            ${worst !== null ? `<span class="deck-flag">${-worst}d overdue</span>` : ""}
+          </div>
+          <div class="deck-body">
+            <h2 class="deck-name">${card.plant ? esc(card.plant.name) : "Anything else"}</h2>
+            <p class="deck-sub">${card.plant
+              ? esc([card.plant.species || (g && g.name), roomLabel(card.room)].filter(Boolean).join(" · "))
+              : "Not tied to a plant"}</p>
+            <div class="deck-acts">${actions}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="deck-nav">
+        <button class="btn secondary" id="deckSkip">Skip</button>
+        ${doable ? `<button class="btn" id="deckAll">Did all ${doable > 1 ? doable : ""}</button>` : ""}
+      </div>
+      <p class="deck-hint">Swipe the card to move on · swipe right when it's all done</p>`;
   };
 
   // Garden-wide AI advisor: Claude reasons over every plant's state + care + weather
@@ -865,7 +872,36 @@ async function viewToday() {
     </div>`;
   }
 
-  html += await agendaSections();
+  html += await cardStack();
+
+  /* Status, not action — so it sits under the card rather than above it.
+     The point of this screen is the plant in front of you; how the collection
+     is doing overall is what you read once that's dealt with, and a summary
+     above the deck pushes the card itself below the fold. */
+  if (gh.total) {
+    html += `
+      <div class="card flat garden-card">
+        <div class="garden-main">
+          <div class="garden-figure">
+            <div class="garden-score">${gh.avg === null ? "—" : gh.avg.toFixed(1)}</div>
+            <div class="garden-band">${gh.avg === null ? "Not checked yet" : esc(gh.band)}</div>
+          </div>
+          ${spark || ""}
+        </div>
+        <div class="garden-stats">
+          <span><b>${gh.total}</b> plant${gh.total === 1 ? "" : "s"}</span>
+          <span class="${overdue.length ? "is-overdue" : ""}"><b>${overdue.length}</b> overdue</span>
+          <span><b>${dueToday.length}</b> due today</span>
+          ${gh.avg === null
+            ? `<span class="garden-muted">no health checks yet</span>`
+            : gh.scored < gh.total
+              ? `<span class="garden-muted">${gh.scored} of ${gh.total} checked</span>`
+              : ""}
+        </div>
+      </div>`;
+  }
+
+
 
   // Week-at-a-glance: which plants need water/fertilizer on each of the next 7 days
   if (plants.some(p => !p.archived)) {
@@ -912,6 +948,71 @@ async function viewToday() {
       </details>` : ""}`;
 
   $view().innerHTML = html;
+
+  /* The deck. Everything here re-renders after the record changes, which is
+     what advances the stack: a card with nothing left on it simply isn't dealt
+     again, and the same index lands on the next one. */
+  const deckRoom = document.getElementById("deckRoom");
+  if (deckRoom) deckRoom.addEventListener("change", async () => {
+    todayRoom = deckRoom.value;
+    todayIndex = 0;
+    render();
+  });
+
+  /* Dealing a new card should show it. Scroll preservation is right for a long
+     list — you finished something and want to stay put — but the deck is one
+     card, and keeping the old offset can leave the new one off-screen. */
+  const nextCard = async () => {
+    await render();
+    const bar = $view().querySelector(".deck-bar");
+    if (bar && bar.getBoundingClientRect().top < 0) bar.scrollIntoView({ block: "start" });
+  };
+
+  const deckSkip = document.getElementById("deckSkip");
+  if (deckSkip) deckSkip.addEventListener("click", () => { todayIndex++; nextCard(); });
+
+  // One row at a time, awaited: two writes to the same plant in flight at once
+  // would have the second overwrite the first's lastWatered.
+  const doAct = async (el) => {
+    if (el.dataset.plant) await logAction(el.dataset.plant, el.dataset.kind);
+    else if (el.dataset.task) {
+      const t = await dbGet("tasks", el.dataset.task);
+      if (t) { t.done = true; await saveRecord("tasks", t); }
+    }
+  };
+  const doAll = async () => {
+    for (const el of [...$view().querySelectorAll(".deck-act[data-do]")]) await doAct(el);
+    await nextCard();
+  };
+
+  $view().querySelectorAll(".deck-act[data-do]").forEach(el => {
+    el.addEventListener("click", async () => { await doAct(el); await nextCard(); });
+  });
+  const deckAll = document.getElementById("deckAll");
+  if (deckAll) deckAll.addEventListener("click", doAll);
+
+  /* Swipe the card the way the screen it resembles is swiped: away to move on,
+     right to say it's all handled. Same thresholds as the plant screen, so a
+     scroll is never mistaken for a decision. */
+  const deck = document.getElementById("deck");
+  if (deck) {
+    let sx = 0, sy = 0, tracking = false;
+    deck.addEventListener("touchstart", e => {
+      tracking = e.touches.length === 1;
+      if (tracking) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }
+    }, { passive: true });
+    deck.addEventListener("touchend", async e => {
+      if (!tracking) return;
+      tracking = false;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - sx, dy = t.clientY - sy;
+      if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+      deck.classList.add(dx < 0 ? "fly-left" : "fly-right");
+      await new Promise(r => setTimeout(r, 180));
+      if (dx > 0) await doAll();
+      else { todayIndex++; await nextCard(); }
+    }, { passive: true });
+  }
 
   $view().querySelectorAll("[data-action=complete]").forEach(btn => {
     btn.addEventListener("click", async e => {
@@ -2954,6 +3055,12 @@ function setTopbarMode(onPlant) {
 
    So the jump only happens when the route actually changes. A redraw of the
    screen you're already on puts you back where you were. */
+/* Where you are in the deck. Module-level because completing something
+   re-renders the whole view, and the card you were on has to survive that. */
+let todayRoom = "";
+let todayIndex = 0;
+let todayLastRoom = null;
+
 let renderedHash = null;
 
 async function render() {

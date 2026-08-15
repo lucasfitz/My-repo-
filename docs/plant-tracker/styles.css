@@ -590,6 +590,83 @@ body.sheet-open { overflow: hidden; }
    worth reading rather than just a tally. */
 .group-count.is-late { color: var(--alert); background: var(--alert-bg); }
 
+/* ---------- Today's deck: one plant at a time ---------- */
+.deck-bar { display: flex; align-items: center; gap: 12px; margin: 6px 0 14px; }
+.deck-room {
+  flex: 1; min-width: 0; min-height: 44px;
+  font-size: 15px; font-weight: 600; letter-spacing: -0.015em;
+}
+/* One room's worth of work needs no picker — a dropdown with a single real
+   choice is a control that does nothing. */
+.deck-only-room {
+  flex: 1; min-width: 0; font-size: 15px; font-weight: 620; letter-spacing: -0.015em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.deck-count {
+  flex: none; font-size: 13px; font-weight: 620; color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Sized so the card and its buttons sit above the fold on a phone: the point
+   is dealing with this plant without scrolling. */
+.deck { touch-action: pan-y pinch-zoom; }
+.deck-card {
+  background: var(--surface); border-radius: var(--r-card);
+  box-shadow: var(--lift-2); overflow: hidden;
+  transition: transform .18s var(--ease), opacity .18s var(--ease);
+}
+.deck.fly-left .deck-card { transform: translateX(-60%) rotate(-4deg); opacity: 0; }
+.deck.fly-right .deck-card { transform: translateX(60%) rotate(4deg); opacity: 0; }
+
+.deck-photo { position: relative; aspect-ratio: 4 / 3; background: var(--surface-sunk); }
+.deck-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.deck-photo-none { width: 100%; height: 100%; display: grid; place-items: center; font-size: 54px; }
+.deck-flag {
+  position: absolute; left: 14px; bottom: 14px;
+  padding: 5px 12px; border-radius: var(--r-pill);
+  background: var(--alert); color: #fff;
+  font-size: 12.5px; font-weight: 700; letter-spacing: -0.01em;
+}
+
+.deck-body { padding: 16px 16px 18px; }
+.deck-name { font-size: 26px; font-weight: 700; letter-spacing: -0.035em; margin: 0; line-height: 1.1; }
+.deck-sub { font-size: 14px; color: var(--ink-2); margin: 3px 0 14px; letter-spacing: -0.01em; }
+.deck-acts { display: grid; gap: 8px; }
+
+/* Big enough to hit while holding a watering can. */
+.deck-act {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  min-height: 58px; padding: 10px 14px; text-align: left;
+  border: 1.5px solid var(--hairline); border-radius: var(--r-field);
+  background: var(--surface); color: inherit; font: inherit;
+  cursor: pointer; text-decoration: none;
+  transition: transform .12s var(--ease), border-color .12s var(--ease), background .12s var(--ease);
+}
+.deck-act:active { transform: scale(.985); background: var(--surface-sunk); }
+.deck-act-icon { flex: none; font-size: 20px; display: flex; align-items: center; }
+.deck-act-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.deck-act-main b { font-size: 15px; font-weight: 620; letter-spacing: -0.015em; }
+.deck-act-sub { font-size: 12.5px; color: var(--ink-2); letter-spacing: 0; line-height: 1.35; }
+.deck-act-sub.is-late { color: var(--alert); font-weight: 620; }
+.deck-tick {
+  flex: none; width: 30px; height: 30px; border-radius: var(--r-pill);
+  border: 1.5px solid var(--hairline); display: grid; place-items: center;
+  color: transparent; font-size: 14px;
+}
+.deck-act:active .deck-tick { background: var(--ink); border-color: var(--ink); color: var(--ground); }
+.deck-act.is-look { border-style: dashed; }
+.deck-go { flex: none; color: var(--ink-3); font-size: 20px; }
+
+.deck-nav { display: flex; gap: 10px; margin-top: 14px; }
+.deck-nav .btn { flex: 1; }
+.deck-hint {
+  text-align: center; font-size: 12px; color: var(--ink-3);
+  margin: 10px 0 4px; letter-spacing: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .deck-card { transition: none; }
+}
+
 /* ---------- Today's agenda: room → plant → what to do ---------- */
 .ag-plant {
   background: var(--surface); border-radius: var(--r-card);
