@@ -611,8 +611,26 @@ body.sheet-open { overflow: hidden; }
 }
 .ag-row + .ag-row { border-top: 1px solid var(--hairline); }
 .ag-main { flex: 1; min-width: 0; }
-.ag-title { font-size: 15px; font-weight: 560; letter-spacing: -0.015em;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Two lines, then clipped — a step from a health check is a whole sentence,
+   and one truncated to a single line stops being an instruction. Long ones
+   open on tap rather than being cut off for good. */
+.ag-title {
+  font-size: 15px; font-weight: 560; letter-spacing: -0.015em;
+  line-height: 1.32; overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+}
+.ag-row.is-open .ag-title { -webkit-line-clamp: unset; }
+/* The reasoning behind a step: only worth the space once it's asked for. */
+.ag-detail {
+  font-size: 13px; color: var(--ink-2); letter-spacing: 0;
+  line-height: 1.4; margin: 4px 0 2px; display: none;
+}
+.ag-row.is-open .ag-detail { display: block; }
+/* A text button, not a control: full width, left aligned, no chrome. */
+.ag-expand {
+  border: none; background: none; padding: 0; font: inherit; color: inherit;
+  text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
 .ag-sub { font-size: 12.5px; color: var(--ink-2); letter-spacing: 0; }
 .ag-sub.is-late { color: var(--alert); font-weight: 600; }
 .ag-row .task-check { width: 28px; height: 28px; min-width: 28px; font-size: 13px; }
