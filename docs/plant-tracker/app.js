@@ -2630,7 +2630,40 @@ async function viewSettings() {
     <div class="card">
       <h2 style="margin-top:0">About</h2>
       <p class="subtitle" style="margin:0">Sprout 🌱 — a little plant-care tracker for two. Data lives on this device; with real-time sync on, it's shared only through your own private Supabase project.</p>
+      <p class="subtitle" style="margin:.75rem 0 .5rem">Running <b id="swVersion">checking…</b></p>
+      <button class="btn" id="swUpdateBtn" type="button">Check for updates</button>
+      <p class="hint" style="color:var(--ink-soft);font-size:.78rem;margin-bottom:0">If a version is waiting, this loads it and restarts the app.</p>
     </div>`;
+
+  const swLabel = document.getElementById("swVersion");
+  if (swLabel) {
+    const sw = navigator.serviceWorker;
+    if (!sw || !sw.controller) swLabel.textContent = "from the network";
+    else {
+      const chan = new MessageChannel();
+      chan.port1.onmessage = e => { if (e.data?.type === "version") swLabel.textContent = e.data.version; };
+      sw.controller.postMessage("version", [chan.port2]);
+      setTimeout(() => { if (swLabel.textContent === "checking…") swLabel.textContent = "an older version"; }, 1200);
+    }
+  }
+  const swUpdateBtn = document.getElementById("swUpdateBtn");
+  if (swUpdateBtn) swUpdateBtn.addEventListener("click", async () => {
+    const sw = navigator.serviceWorker;
+    if (!sw) return toast("No app cache to update");
+    swUpdateBtn.disabled = true;
+    try {
+      const reg = await sw.getRegistration();
+      if (!reg) return toast("Nothing cached yet");
+      await reg.update();
+      // A worker sitting in "waiting" is the new version held back because this
+      // page is still using the old one. Tell it to take over — controllerchange
+      // then reloads us into it.
+      const pending = reg.waiting || reg.installing;
+      if (pending) { pending.postMessage("skipWaiting"); toast("Updating…"); }
+      else toast("Already up to date");
+    } catch { toast("Couldn't check for updates"); }
+    finally { swUpdateBtn.disabled = false; }
+  });
 
   const aiForm = document.getElementById("aiForm");
   if (aiForm) aiForm.addEventListener("submit", async e => {
@@ -3145,7 +3178,45 @@ async function render() {
     }
   });
 
+  /* Keeping the app up to date. Registering and walking away isn't enough: a
+     new worker can install, activate and claim this page while the page goes
+     on running the app.js it started with. On a home-screen PWA that page can
+     live for days, so a merged change simply never appears. So: ask for an
+     update whenever the app is opened or comes back to the foreground, and
+     when a new worker actually takes over, reload once to pick it up. */
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("sw.js").catch(() => {});
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloading = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      // First install claims the page too — that one is already current.
+      if (!hadController || reloading) return;
+      reloading = true;
+      location.reload();
+    });
+    navigator.serviceWorker.register("sw.js").then(reg => {
+      /* A worker that has finished installing waits for every page using the
+         old one to go away — which, for an app you never really close, is
+         never. skipWaiting() inside install isn't dependable once the page is
+         controlled, so promote it from here: that reliably fires
+         controllerchange, and the reload above lands us on the new build. */
+      const promote = w => {
+        if (!w || !navigator.serviceWorker.controller) return;
+        if (w.state === "installed") w.postMessage("skipWaiting");
+        else w.addEventListener("statechange", () => {
+          if (w.state === "installed") w.postMessage("skipWaiting");
+        });
+      };
+      promote(reg.waiting);
+      reg.addEventListener("updatefound", () => promote(reg.installing));
+      const check = () => reg.update().catch(() => {});
+      check();
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
+      window.addEventListener("online", check);
+      setInterval(check, 60 * 60 * 1000);
+      navigator.serviceWorker.addEventListener("message", e => {
+        if (e.data && e.data.type === "version") state.swVersion = e.data.version;
+      });
+      navigator.serviceWorker.controller?.postMessage("version");
+    }).catch(() => {});
   }
 })();
