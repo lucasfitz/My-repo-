@@ -1,5 +1,5 @@
 // Sprout service worker — offline-first app shell cache.
-const CACHE = "sprout-v30";
+const CACHE = "sprout-v31";
 const ASSETS = [
   "./",
   "./index.html",
