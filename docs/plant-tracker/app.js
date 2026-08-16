@@ -300,12 +300,20 @@ function maxWaterGap(days) {
   return max;
 }
 
-/* Move a watering date back to the most recent watering day.
+/* Move a watering date onto the rhythm.
 
-   Backwards, not forwards: a little early is harmless, whereas rounding up to
-   the next slot could leave a thirsty plant dry for most of a week. A plant
-   that needs water more often than the rhythm's longest gap can't be served by
-   it at all — outdoor pots in summer, mostly — so it keeps its own schedule. */
+   Backwards by preference: a little early is harmless, whereas a plant left
+   dry past its day is the failure the schedule exists to prevent. A plant
+   that needs water more often than the rhythm's longest gap can't be served
+   by it at all, so it keeps its own schedule.
+
+   One exception to backwards: when the backward snap would land in the past,
+   a plant that isn't even due yet would surface as "overdue" — a deck full
+   of invented work on a day that isn't a watering day at all, which is the
+   opposite of what a rhythm promises. A not-yet-due plant rolls forward to
+   the next watering day instead; the floor rule (interval ≥ longest gap)
+   is exactly what makes that bounded wait safe. Genuinely overdue stays
+   overdue — that work is real. */
 function snapToWaterDay(dateStr, every) {
   const days = waterDays();
   if (!days.length || every < maxWaterGap(days)) return dateStr;
@@ -314,7 +322,14 @@ function snapToWaterDay(dateStr, every) {
     if (days.includes(d.getDay())) break;
     d.setDate(d.getDate() - 1);
   }
-  return d.toISOString().slice(0, 10);
+  const snapped = d.toISOString().slice(0, 10);
+  if (snapped >= todayStr() || dateStr < todayStr()) return snapped;
+  const f = new Date(dateStr + "T12:00:00");
+  for (let i = 0; i < 7; i++) {
+    if (days.includes(f.getDay())) break;
+    f.setDate(f.getDate() + 1);
+  }
+  return f.toISOString().slice(0, 10);
 }
 
 /* Raise anything that wants water more often than the rhythm can give it.
@@ -324,17 +339,27 @@ function snapToWaterDay(dateStr, every) {
    on the list mid-week. Moving it up to the rhythm's longest gap is what
    actually makes twice a week the whole story.
 
-   Only ever raises — a cactus on 90 days is left alone. Outdoor plants are
-   included, but the seasonal adjustment still shortens their interval in
-   summer, so a hot-weather pot can drift back off the rhythm on its own. */
+   The comparison uses the interval as it is actually lived: outdoor plants
+   run tighter in summer (seasonFactor), so a pot raised to the bare floor in
+   August would be shrunk right back below it at render time and fall off the
+   rhythm the moment the button was pressed — which read, correctly, as "this
+   button does nothing". The raw interval is raised until the seasonal
+   effective interval clears the floor.
+
+   Only ever raises — a cactus on 90 days is left alone. */
 async function applyWaterRhythm() {
   const floor = maxWaterGap(waterDays());
   if (!Number.isFinite(floor)) return [];
   const changed = [];
   for (const p of await dbAll("plants")) {
-    if (p.archived || !p.waterEvery || p.waterEvery >= floor) continue;
-    changed.push({ name: p.name, from: p.waterEvery, to: floor });
-    p.waterEvery = floor;
+    if (p.archived || !p.waterEvery) continue;
+    const factor = isOutdoorPlant(p) ? seasonFactor() : 1;
+    const lived = e => Math.max(1, Math.round(e * factor));
+    if (lived(p.waterEvery) >= floor) continue;
+    let raw = Math.max(p.waterEvery + 1, Math.ceil(floor / factor));
+    while (lived(raw) < floor) raw++;
+    changed.push({ name: p.name, from: p.waterEvery, to: raw });
+    p.waterEvery = raw;
     await saveRecord("plants", p);
   }
   return changed;
@@ -354,7 +379,10 @@ function nextDue(plant, kind) {
   const last = kind === "water" ? plant.lastWatered : plant.lastFertilized;
   const base = last || plant.createdAt.slice(0, 10);
   const due = addDays(base, every);
-  return kind === "water" ? snapToWaterDay(due, every) : due;
+  // Fertilizing happens standing at the plant with the can — it belongs on
+  // watering days too, or the calendar keeps sprouting lone mid-week chips
+  // that the rhythm was supposed to have cleared away.
+  return snapToWaterDay(due, every);
 }
 
 // ---------------------------------------------------------------------------
@@ -3071,10 +3099,12 @@ async function viewSettings() {
     btn.disabled = true;
     const moved = await applyWaterRhythm();
     btn.disabled = false;
+    const dayList = waterDays().map(d => DAY_NAMES[d]).join(", ");
     out.textContent = moved.length
-      ? `Moved ${moved.length} plant${moved.length === 1 ? "" : "s"} up to every ${moved[0].to} days: `
-        + moved.map(m => `${m.name} (was ${m.from}d)`).join(", ")
-      : "Every plant already fits — nothing needed changing.";
+      ? `Moved ${moved.length} plant${moved.length === 1 ? "" : "s"} onto the rhythm: `
+        + moved.map(m => `${m.name} (${m.from}d → ${m.to}d)`).join(", ")
+        + `. The Today calendar now groups watering on ${dayList}.`
+      : `Every plant already fits — watering now lands on ${dayList}.`;
     if (moved.length) toast(`${moved.length} plant${moved.length === 1 ? "" : "s"} moved onto the rhythm`);
   });
   document.querySelectorAll("#waterDayPills .pill").forEach(pill => {
