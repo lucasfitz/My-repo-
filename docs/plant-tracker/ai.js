@@ -171,8 +171,17 @@ const HEALTH_SCHEMA = {
               "'Move it 3 ft back from the south window', not 'consider light levels'"
           },
           detail: { type: "string", description: "One line on why this, tied to what you saw" },
-          kind: { type: "string", enum: ["water", "fertilize", "repot", "prune", "move", "treat", "inspect", "other"] },
-          when: { type: "string", enum: ["today", "this week", "ongoing"] },
+          kind: { type: "string", enum: ["water", "fertilize", "repot", "prune", "move", "rotate", "treat", "inspect", "other"] },
+          due_in_days: {
+            type: "integer",
+            description: "Days until this should be done: 0 = today. The owner sees the step on that day and not " +
+              "before, so schedule forward only when waiting genuinely matters (a follow-up check, a treatment interval)."
+          },
+          repeat_every_days: {
+            type: "integer",
+            description: "0 for a one-off. For a standing chore — rotate a quarter turn, wipe the leaves, refill " +
+              "the pebble tray — the days between repeats; it will resurface on that rhythm, each time as a single day's task."
+          },
           water_every_days: {
             type: "integer",
             description: "New watering interval in days if the routine itself should change; 0 to leave the schedule alone"
@@ -182,10 +191,12 @@ const HEALTH_SCHEMA = {
             description: "New fertilizing interval in days if the routine itself should change; 0 to leave the schedule alone"
           }
         },
-        required: ["title", "detail", "kind", "when", "water_every_days", "fert_every_days"],
+        required: ["title", "detail", "kind", "due_in_days", "repeat_every_days", "water_every_days", "fert_every_days"],
         additionalProperties: false
       },
       description: "Concrete steps, most important first. Every issue above needs a step here that fixes it. " +
+        "These land on the owner's checklist automatically, each on its scheduled day, so only include steps worth " +
+        "doing — and never a duplicate of routine care the schedule already covers. " +
         "Set an interval field only when the standing schedule is wrong — a one-off soak is an action, not a schedule change."
     }
   },
@@ -273,6 +284,10 @@ ${describeCareHistory(logs) || "(none recorded)"}`,
     issues: result.issues, actions: result.actions, at,
   };
   await saveRecord("plants", plant);
+  // The steps land on the checklist by themselves, each due on its day. A
+  // recommendation nobody has to transcribe is the only kind that reliably
+  // happens — the report on the plant page keeps the reasoning.
+  await materializeHealthTasks(plant);
   return plant.health;
 }
 
@@ -557,8 +572,19 @@ function healthChip(health, { withLabel = false } = {}) {
 
 const ACTION_ICONS = {
   water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️",
-  move: "↔️", treat: "🧴", inspect: "🔍", other: "•",
+  move: "↔️", rotate: "🔄", treat: "🧴", inspect: "🔍", other: "•",
 };
+
+// When a step happens, in words. New assessments carry numbers; ones stored
+// before the schema learned to schedule only had a phrase, which still reads.
+function actionWhenLabel(act) {
+  if (act.repeat_every_days > 0) return `every ${act.repeat_every_days}d`;
+  if (Number.isInteger(act.due_in_days)) {
+    return act.due_in_days <= 0 ? "today"
+      : act.due_in_days === 1 ? "tomorrow" : `in ${act.due_in_days}d`;
+  }
+  return act.when || "today";
+}
 
 // A step's identity has to survive a re-render so an added step still reads as
 // added — derived from the plant and the moment of the assessment, not random.
@@ -588,7 +614,7 @@ function renderAssessment(a, { plantId = "", addedIds = [] } = {}) {
           <div class="act-title">${esc(act.title)}</div>
           ${act.detail ? `<div class="act-detail">${esc(act.detail)}</div>` : ""}
           <div class="act-meta">
-            <span class="act-when">${esc(act.when)}</span>
+            <span class="act-when">${esc(actionWhenLabel(act))}</span>
             ${plan ? `<span class="act-plan">changes the plan → ${esc(planLabel)}</span>` : ""}
           </div>
         </div>
