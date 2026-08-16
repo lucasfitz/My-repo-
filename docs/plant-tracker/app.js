@@ -453,9 +453,13 @@ function resizeImage(file, maxDim = 1400) {
    here — re-importing a collection shouldn't fire a check per plant.
 
    `resize: false` is for a blob that's already been through resizeImage(). */
-async function addPhoto(plantId, file, { assess = true, resize = true } = {}) {
+/* `batch` ties photos picked in one go into one journal entry — five angles
+   of the same plant on the same afternoon are one visit, not five. */
+async function addPhoto(plantId, file, { assess = true, resize = true, batch = null } = {}) {
   const blob = resize ? await resizeImage(file) : file;
-  await saveRecord("photos", { id: uid(), plantId, blob, createdAt: new Date().toISOString() });
+  const rec = { id: uid(), plantId, blob, createdAt: new Date().toISOString() };
+  if (batch) rec.batch = batch;
+  await saveRecord("photos", rec);
   if (assess) autoAssess(plantId);
 }
 
@@ -2252,8 +2256,8 @@ async function viewPlant(id) {
   $view().innerHTML = `
     <div class="hero">
       ${heroURL ? `<img src="${heroURL}" alt="${esc(p.name)}">` : `<div class="no-photo">${g.emoji}</div>`}
-      <button class="hero-action" id="btnWaterHero" title="Water ${esc(p.name)}" aria-label="Water ${esc(p.name)}">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2s5.6 5.9 5.6 9.6a5.6 5.6 0 11-11.2 0C6.4 9.1 12 3.2 12 3.2z"/></svg>
+      <button class="hero-action" id="btnPhotoHero" title="Add photos of ${esc(p.name)}" aria-label="Add photos of ${esc(p.name)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 18.5a2 2 0 01-2 2H4a2 2 0 01-2-2V9a2 2 0 012-2h3.2l1.9-2.5h5.8L16.8 7H20a2 2 0 012 2z"/><circle cx="12" cy="13.5" r="3.8"/></svg>
       </button>
     </div>
     <h1>${esc(p.name)}</h1>
@@ -2312,10 +2316,27 @@ async function viewPlant(id) {
     ${p.notes ? `<div class="card flat"><b>Notes</b><br>${esc(p.notes).replace(/\n/g, "<br>")}</div>` : ""}
 
     <div class="section-head"><h2>Photo journal</h2>
-      <label class="btn small secondary" style="cursor:pointer">Add photo<input type="file" id="photoInput" accept="image/*" multiple hidden></label>
+      <label class="btn small secondary" style="cursor:pointer">Add photos<input type="file" id="photoInput" accept="image/*" multiple hidden></label>
     </div>
-    ${photos.length ? `<div class="gallery" id="gallery">
-      ${photos.map(ph => `<img src="${viewURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}
+    ${photos.length ? `<div id="gallery">
+      ${(() => {
+        /* One entry per visit: photos picked together share a batch id and
+           read as a single dated entry. Photos from before batches existed
+           each stand alone. */
+        const entries = [];
+        const byBatch = new Map();
+        for (const ph of photos) {
+          const key = ph.batch || ph.id;
+          if (!byBatch.has(key)) { const en = { at: ph.createdAt, shots: [] }; byBatch.set(key, en); entries.push(en); }
+          byBatch.get(key).shots.push(ph);
+        }
+        return entries.map(en => `
+          <div class="journal-entry">
+            <div class="journal-date">${fmtDateTime(en.at)}${en.shots.length > 1 ? ` · ${en.shots.length} photos` : ""}</div>
+            <div class="gallery">${en.shots.map(ph =>
+              `<img src="${viewURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}</div>
+          </div>`).join("");
+      })()}
     </div>` : `<p class="subtitle">No photos yet — take a growth pic!</p>`}
 
     <h2>History</h2>
@@ -2354,7 +2375,10 @@ async function viewPlant(id) {
 
   const act = async (type) => { await logAction(id, type); render(); };
   document.getElementById("btnWater").addEventListener("click", () => act("water"));
-  document.getElementById("btnWaterHero").addEventListener("click", () => act("water"));
+  // The hero button opens the journal's picker — same input, so photos taken
+  // here batch into one entry exactly like the button below.
+  document.getElementById("btnPhotoHero").addEventListener("click", () =>
+    document.getElementById("photoInput").click());
   document.getElementById("btnFert").addEventListener("click", () => act("fertilize"));
   document.getElementById("btnRepot").addEventListener("click", () => act("repot"));
   document.getElementById("btnPrune").addEventListener("click", () => act("prune"));
@@ -2370,14 +2394,15 @@ async function viewPlant(id) {
   document.getElementById("photoInput").addEventListener("change", async e => {
     const files = [...e.target.files];
     if (!files.length) return;
-    // Save them all, then run one check — an assessment reads the newest few
-    // photos, so a call per file would ask the same question repeatedly.
+    // Save them all under one batch, then run one check — the pick is one
+    // visit to the plant, so it becomes one journal entry and one question.
+    const batch = files.length > 1 ? uid() : null;
     let saved = 0;
     for (const file of files) {
-      try { await addPhoto(id, file, { assess: false }); saved++; } catch { /* skip unreadable */ }
+      try { await addPhoto(id, file, { assess: false, batch }); saved++; } catch { /* skip unreadable */ }
     }
     if (!saved) { toast("Couldn't read that image"); return; }
-    const label = saved > 1 ? `${saved} photos saved` : "Photo saved";
+    const label = saved > 1 ? `Journal entry added — ${saved} photos` : "Photo saved";
     toast(aiConfigured() ? `${label} — checking health…` : label);
     if (saved < files.length) toast(`Skipped ${files.length - saved} unreadable photo(s)`);
     autoAssess(id);
