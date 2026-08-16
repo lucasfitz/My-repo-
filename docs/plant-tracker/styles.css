@@ -591,65 +591,113 @@ body.sheet-open { overflow: hidden; }
    worth reading rather than just a tally. */
 .group-count.is-late { color: var(--alert); background: var(--alert-bg); }
 
-/* ---------- Today's deck: one plant at a time ---------- */
-.deck-bar { display: flex; align-items: center; gap: 12px; margin: 6px 0 14px; }
-.deck-room {
-  flex: 1; min-width: 0; min-height: 44px;
-  font-size: 15px; font-weight: 600; letter-spacing: -0.015em;
+/* ---------- Today's deck: the day as a visible stack of cards ---------- */
+.deck-bar { margin: 6px 0 10px; }
+/* Room chips scroll sideways rather than wrap — one thumbable row. */
+.room-chips {
+  display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch;
 }
-/* One room's worth of work needs no picker — a dropdown with a single real
-   choice is a control that does nothing. */
-.deck-only-room {
-  flex: 1; min-width: 0; font-size: 15px; font-weight: 620; letter-spacing: -0.015em;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.room-chips::-webkit-scrollbar { display: none; }
+.room-chip {
+  flex: none; padding: 8px 14px; border-radius: var(--r-pill);
+  border: none; background: var(--surface-sunk); color: var(--ink-2);
+  font: inherit; font-size: 13px; font-weight: 620; letter-spacing: -0.01em;
+  cursor: pointer; transition: background .15s var(--ease), color .15s var(--ease);
+}
+.room-chip.active { background: var(--ink); color: var(--ground); }
+
+/* The day as a bar that fills — clearing the deck is a game you can win. */
+.deck-progress { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; }
+.deck-progress-bar {
+  flex: 1; height: 4px; border-radius: 2px; background: var(--surface-sunk);
+  overflow: hidden;
+}
+.deck-progress-bar i {
+  display: block; height: 100%; border-radius: 2px; background: var(--ink);
+  transition: width .5s var(--ease);
 }
 .deck-count {
-  flex: none; font-size: 13px; font-weight: 620; color: var(--ink-2);
+  flex: none; font-size: 12.5px; font-weight: 620; color: var(--ink-2);
   font-variant-numeric: tabular-nums;
 }
 
-/* Sized so the card and its buttons sit above the fold on a phone: the point
-   is dealing with this plant without scrolling. */
-.deck { touch-action: pan-y pinch-zoom; }
+.deck { display: flex; flex-direction: column; gap: 12px; touch-action: pan-y pinch-zoom; }
 .deck-card {
   position: relative;
   background: var(--surface); border-radius: var(--r-card);
-  box-shadow: var(--lift-2); overflow: hidden;
+  box-shadow: var(--lift-1); overflow: hidden;
   will-change: transform;
-}
-/* A newly dealt card lands; a dragged one follows the finger (JS drives the
-   transform, so no standing transition — it would fight the drag). */
-.deck-card.deal-in { animation: deal-in .3s cubic-bezier(.2,.8,.25,1.1); }
-@keyframes deal-in {
-  from { transform: translateY(14px) scale(.965); opacity: 0; }
-  to   { transform: none; opacity: 1; }
+  cursor: pointer;
 }
 
-/* What the swipe will do, stamped on the card as it goes — opacity is driven
+/* What the swipe will do, told on the card as it moves — opacity is driven
    from the drag, proportional to how far past thinking-about-it you are. */
 .deck-stamp {
-  position: absolute; top: 14px; z-index: 2;
-  padding: 6px 14px; border-radius: 10px;
-  font-size: 15px; font-weight: 800; letter-spacing: .02em;
-  opacity: 0; pointer-events: none; transform: rotate(-4deg);
+  position: absolute; top: 50%; translate: 0 -50%; z-index: 2;
+  padding: 8px 14px; border-radius: var(--r-pill);
+  font-size: 14px; font-weight: 700; letter-spacing: .01em;
+  opacity: 0; pointer-events: none;
 }
-.deck-stamp.is-done { left: 14px; background: #22a06b; color: #fff; }
-.deck-stamp.is-later { right: 14px; transform: rotate(4deg); background: var(--surface); color: var(--ink-2); border: 2px solid var(--hairline); }
+.deck-stamp.is-photo { left: 16px; background: var(--ink); color: var(--ground); }
+.deck-stamp.is-later { right: 16px; background: var(--surface); color: var(--ink-2); border: 1.5px solid var(--hairline); }
 
-.deck-photo { position: relative; aspect-ratio: 4 / 3; background: var(--surface-sunk); }
+/* Shorter than the hero photo the single-card deck had: with the whole queue
+   on screen, each card only needs to be recognisable, and the photo fades
+   into the card so the name sits half on it. */
+.deck-photo { position: relative; height: 172px; background: var(--surface-sunk); }
 .deck-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.deck-photo-none { width: 100%; height: 100%; display: grid; place-items: center; font-size: 54px; }
-.deck-flag {
-  position: absolute; left: 14px; bottom: 14px;
-  padding: 5px 12px; border-radius: var(--r-pill);
-  background: var(--alert); color: #fff;
-  font-size: 12.5px; font-weight: 700; letter-spacing: -0.01em;
+.deck-photo::after {
+  content: ""; position: absolute; inset: auto 0 0 0; height: 56px;
+  background: linear-gradient(to top, var(--surface), transparent);
 }
+.deck-photo-none { width: 100%; height: 100%; display: grid; place-items: center; font-size: 48px; }
+.deck-room-badge {
+  position: absolute; top: 12px; right: 12px; z-index: 1;
+  padding: 4px 10px; border-radius: var(--r-pill);
+  background: rgba(0,0,0,.32); color: #fff; backdrop-filter: blur(4px);
+  font-size: 11.5px; font-weight: 620; letter-spacing: 0;
+}
+.deck-flag {
+  position: absolute; left: 12px; bottom: 12px; z-index: 1;
+  padding: 4px 10px; border-radius: var(--r-pill);
+  background: var(--alert); color: #fff;
+  font-size: 11.5px; font-weight: 700; letter-spacing: -0.01em;
+}
+.deck-cam {
+  position: absolute; top: 8px; left: 8px; z-index: 1;
+  width: 38px; height: 38px; border-radius: var(--r-pill); border: none;
+  background: rgba(0,0,0,.32); backdrop-filter: blur(4px);
+  font-size: 16px; cursor: pointer; display: grid; place-items: center;
+}
+.deck-cam:active { background: rgba(0,0,0,.5); }
 
-.deck-body { padding: 16px 16px 18px; }
-.deck-name { font-size: 26px; font-weight: 700; letter-spacing: -0.035em; margin: 0; line-height: 1.1; }
-.deck-sub { font-size: 14px; color: var(--ink-2); margin: 3px 0 14px; letter-spacing: -0.01em; }
-.deck-acts { display: grid; gap: 8px; }
+.deck-body { padding: 2px 16px 14px; position: relative; }
+.deck-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+.deck-title { flex: 1; min-width: 0; }
+.deck-name { font-size: 21px; font-weight: 700; letter-spacing: -0.03em; margin: 0; line-height: 1.15; }
+.deck-sub { font-size: 12.5px; color: var(--ink-2); margin: 1px 0 0; letter-spacing: 0; font-style: italic; }
+.deck-meta { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.deck-lastw { font-size: 10.5px; color: var(--ink-3); letter-spacing: 0; }
+
+/* Jobs as pills: the compressed form. Tap completes; the sheet has the prose. */
+.deck-pills { display: flex; flex-wrap: wrap; gap: 7px; }
+.job {
+  display: inline-flex; align-items: center; gap: 5px;
+  min-height: 36px; padding: 6px 13px; max-width: 100%;
+  border: none; border-radius: var(--r-pill);
+  background: var(--surface-sunk); color: var(--ink);
+  font: inherit; font-size: 13px; font-weight: 620; letter-spacing: -0.01em;
+  cursor: pointer; transition: transform .1s var(--ease), background .15s var(--ease);
+}
+.job:active { transform: scale(.94); }
+.job.water { background: var(--cool-bg); color: var(--cool); }
+.job.fertilize { background: var(--warn-bg); color: var(--warn); }
+.job.late { background: var(--alert-bg); color: var(--alert); }
+.job.chore { background: var(--surface-sunk); color: var(--ink-2); }
+.job-clip {
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* Big enough to hit while holding a watering can. */
 .deck-act {
@@ -682,15 +730,65 @@ body.sheet-open { overflow: hidden; }
 }
 .deck-drop:active { background: var(--surface-sunk); }
 
-.deck-nav { display: flex; gap: 10px; margin-top: 14px; }
-.deck-nav .btn { flex: 1; }
 .deck-hint {
   text-align: center; font-size: 12px; color: var(--ink-3);
-  margin: 10px 0 4px; letter-spacing: 0;
+  margin: 12px 0 4px; letter-spacing: 0;
 }
+
+/* ---------- The card's sheet: the full story, pulled up from below ---------- */
+.sheet-back {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(20, 26, 22, 0);
+  backdrop-filter: blur(0px);
+  transition: background .25s var(--ease), backdrop-filter .25s var(--ease);
+  display: flex; flex-direction: column; justify-content: flex-end;
+}
+.sheet-back.open { background: rgba(20, 26, 22, .45); backdrop-filter: blur(2px); }
+.sheet {
+  background: var(--ground); border-radius: 22px 22px 0 0;
+  max-height: 84%; display: flex; flex-direction: column;
+  transform: translateY(100%);
+  transition: transform .3s cubic-bezier(.2,.9,.3,1.02);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.sheet-back.open .sheet { transform: none; }
+.sheet-grip {
+  width: 40px; height: 4px; border-radius: 2px; background: var(--hairline);
+  margin: 10px auto 4px; flex: none;
+}
+.sheet-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 18px 14px; border-bottom: 1px solid var(--hairline); flex: none;
+}
+.sheet-thumb {
+  width: 52px; height: 52px; border-radius: 16px; object-fit: cover;
+  background: var(--surface-sunk); flex: none; font-size: 24px;
+}
+.sheet-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.sheet-title b { font-size: 18px; font-weight: 700; letter-spacing: -0.025em; }
+.sheet-title span { font-size: 12.5px; color: var(--ink-2); font-style: italic; }
+.sheet-close {
+  flex: none; width: 32px; height: 32px; border-radius: var(--r-pill); border: none;
+  background: var(--surface-sunk); color: var(--ink-2); font-size: 13px;
+  cursor: pointer; display: grid; place-items: center;
+}
+.sheet-body {
+  overflow-y: auto; padding: 14px 18px; display: grid; gap: 8px;
+}
+.sheet-tip {
+  background: var(--surface-sunk); border-radius: var(--r-field);
+  padding: 12px 14px; font-size: 12.5px; color: var(--ink-2); line-height: 1.5;
+}
+.sheet-tip b { color: var(--ink); }
+.sheet-foot { flex: none; padding: 10px 18px 14px; }
+.deck-act.is-done-row { opacity: .45; }
+.deck-act.is-done-row .deck-tick {
+  background: var(--ink); border-color: var(--ink); color: var(--ground);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .deck-card { transition: none !important; }
-  .deck-card.deal-in { animation: none; }
+  .sheet-back, .sheet { transition: none; }
 }
 
 /* ---------- Today's agenda: room → plant → what to do ---------- */
