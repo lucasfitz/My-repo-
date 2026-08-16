@@ -174,8 +174,10 @@ const HEALTH_SCHEMA = {
           kind: { type: "string", enum: ["water", "fertilize", "repot", "prune", "move", "rotate", "treat", "inspect", "other"] },
           due_in_days: {
             type: "integer",
-            description: "Days until this should be done: 0 = today. The owner sees the step on that day and not " +
-              "before, so schedule forward only when waiting genuinely matters (a follow-up check, a treatment interval)."
+            description: "Days until this step becomes ready: 0 = ready now. Ready steps are shown alongside the " +
+              "plant's next due watering or fertilizing — the owner reads them standing at the plant, can in hand — " +
+              "so phrase steps to be done during that visit, and schedule forward only when waiting genuinely " +
+              "matters (a follow-up check, a treatment interval)."
           },
           repeat_every_days: {
             type: "integer",
