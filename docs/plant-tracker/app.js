@@ -718,11 +718,21 @@ async function viewToday() {
      a task due Thursday appears Thursday, a rotation resurfaces on its
      rhythm, and the old "Needs a look" row (a link, not an action) is gone —
      a struggling plant's card now carries the actual steps, because every
-     assessment materializes them onto the checklist itself. */
+     assessment materializes them onto the checklist itself.
+
+     Recommendations ride cards; they never summon one. A card exists because
+     the plant needs care today or a person put something on the list — the
+     AI's steps then come along for the visit, which is where they belong:
+     "check the leaf joints for mealybugs" is a thing you do standing at the
+     plant with the can in your hand, not a reason to walk over on a day it
+     needs nothing. A step whose day has come simply waits, dealt with the
+     plant's next care visit. (If a plant has no care schedule at all, its
+     steps do summon — otherwise they'd wait forever.) */
   const AGENDA_ORDER = { care: 0, task: 1 };
 
   const buildAgenda = () => {
     const rows = [];
+    const summoned = new Set();
     for (const t of care) {
       if (t.delta > 0) continue;
       let wxTag = "";
@@ -730,13 +740,19 @@ async function viewToday() {
         if (wxFlags.rainToday) wxTag = ` · <span class="wx-tag">rain may cover this</span>`;
         else if (wxFlags.hotToday) wxTag = ` · <span class="wx-tag hot">hot — don't skip</span>`;
       }
+      summoned.add(t.plant.id);
       rows.push({ kind: "care", t, wxTag, plant: t.plant, urgency: AGENDA_ORDER.care + Math.min(0, t.delta) });
     }
     const byId = new Map(plants.map(p => [p.id, p]));
-    for (const task of custom) {
-      if (task.done) continue;
-      if (task.due && task.due > todayStr()) continue; // its day hasn't come
-      rows.push({ kind: "task", task, plant: byId.get(task.plantId) || null, urgency: AGENDA_ORDER.task });
+    const open = custom.filter(t => !t.done && !(t.due && t.due > todayStr()));
+    for (const task of open) {
+      if (task.by !== "Sprout AI") summoned.add(task.plantId);
+    }
+    for (const task of open) {
+      const plant = byId.get(task.plantId) || null;
+      if (task.by === "Sprout AI" && plant && !summoned.has(plant.id) &&
+          (nextDue(plant, "water") || nextDue(plant, "fertilize"))) continue;
+      rows.push({ kind: "task", task, plant, urgency: AGENDA_ORDER.task });
     }
     return rows;
   };
@@ -928,9 +944,11 @@ async function viewToday() {
       const d = new Date(); d.setDate(d.getDate() + i);
       const ds = addDays(todayStr(), i);
       const label = i === 0 ? "Today" : d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
-      // Scheduled checklist items too — a step that left today's deck for
-      // Thursday should be findable on Thursday, not just gone.
-      const dayTasks = custom.filter(t => !t.done && t.due &&
+      // Scheduled checklist items too — a task that left today's deck for
+      // Thursday should be findable on Thursday, not just gone. Only the
+      // human ones: AI steps ride the plant's care visits, and those days
+      // are already on this chart as the watering chips.
+      const dayTasks = custom.filter(t => !t.done && t.by !== "Sprout AI" && t.due &&
         (i === 0 ? t.due <= ds : t.due === ds));
       const chips = list.map(t =>
         `<span class="badge ${t.delta < 0 ? "overdue" : t.kind === "water" ? "water" : "fertilize"}">${esc(t.plant.name)}</span>`)
