@@ -687,3 +687,111 @@ function renderGardenInsights(g) {
       ${g.tip ? `<p class="ai-tip">${esc(g.tip)}</p>` : ""}
     </div>`;
 }
+
+// ---------------------------------------------------------------------------
+// Talking to the intelligence about one plant
+// ---------------------------------------------------------------------------
+/* The correction channel. Health checks and identification write to the
+   record on their own — so when one of them gets something wrong, the owner
+   needs somewhere to say so in plain words and have the record actually
+   change. Every "set_" field is an edit the reply is allowed to make;
+   sentinels ("" / -1 / "leave") mean hands off. The model edits only what
+   the owner asked for or plainly implied — the reply says what changed, and
+   the app writes it, so there is no "I've updated that" that didn't happen. */
+function chatSchema() {
+  return {
+    type: "object",
+    properties: {
+      reply: {
+        type: "string",
+        description: "Your answer to the owner, in one or two short conversational paragraphs. " +
+          "If you're changing anything, say what and why; if you can't do something, say so plainly."
+      },
+      set_name: { type: "string", description: "Rename the plant; \"\" to leave the name alone" },
+      set_room: { type: "string", description: "Move it to this room; \"\" to leave the room alone" },
+      set_species_key: {
+        type: "string",
+        enum: ["", ...allSpecies().map(g => g.key)],
+        description: "Correct the species to this care-guide entry; \"\" to leave it. Use 'other' only when nothing in the guide fits."
+      },
+      set_species_name: {
+        type: "string",
+        description: "Display name for the corrected species (e.g. 'Hoya carnosa'); \"\" unless set_species_key is set"
+      },
+      set_water_every_days: { type: "integer", description: "New watering interval in days; 0 turns the schedule off; -1 to leave it alone" },
+      set_fert_every_days: { type: "integer", description: "New fertilizing interval in days; 0 turns it off; -1 to leave it alone" },
+      set_last_watered: { type: "string", description: "Correct the last-watered date, YYYY-MM-DD; \"\" to leave it" },
+      set_last_fertilized: { type: "string", description: "Correct the last-fertilized date, YYYY-MM-DD; \"\" to leave it" },
+      set_outdoor: { type: "string", enum: ["leave", "outdoor", "indoor"], description: "Where the plant lives, if the owner corrected it" },
+      set_notes: {
+        type: "string",
+        description: "Replace the owner's notes with this text — include anything from the existing notes worth keeping; \"\" to leave them"
+      },
+      clear_health: { type: "boolean", description: "True to discard the last health assessment because it was wrong or is now stale" },
+      add_tasks: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "One concrete instruction" },
+            detail: { type: "string", description: "One line on why" },
+            kind: { type: "string", enum: ["water", "fertilize", "repot", "prune", "move", "rotate", "treat", "inspect", "other"] },
+            due_in_days: { type: "integer", description: "0 = ready now" },
+            repeat_every_days: { type: "integer", description: "0 for a one-off; N for a standing chore" }
+          },
+          required: ["title", "detail", "kind", "due_in_days", "repeat_every_days"],
+          additionalProperties: false
+        },
+        description: "New checklist steps, only if the owner asked for something to be done or reminded about"
+      },
+      complete_task_ids: {
+        type: "array", items: { type: "string" },
+        description: "Open task ids (from the list provided) the owner says are already done"
+      },
+      drop_task_ids: {
+        type: "array", items: { type: "string" },
+        description: "Open task ids the owner wants gone — wrong, unwanted, or no longer relevant"
+      }
+    },
+    required: ["reply", "set_name", "set_room", "set_species_key", "set_species_name",
+      "set_water_every_days", "set_fert_every_days", "set_last_watered", "set_last_fertilized",
+      "set_outdoor", "set_notes", "clear_health", "add_tasks", "complete_task_ids", "drop_task_ids"],
+    additionalProperties: false
+  };
+}
+
+/* Context is rebuilt from the live record on every turn, so an edit applied
+   two messages ago is simply true in the next one — the transcript carries
+   the conversation, never the state. */
+async function aiPlantChat(plantId, transcript) {
+  const plant = await dbGet("plants", plantId);
+  const g = guideEntry(plant.speciesKey);
+  const logs = await dbAllByIndex("logs", "plantId", plantId);
+  const openTasks = (await dbAll("tasks")).filter(t => t.plantId === plantId && !t.done);
+  const env = await describeEnvironment(plant);
+
+  const h = plant.health;
+  const system = `You are Sprout's plant assistant, talking with the owner about one specific plant. You can edit the plant's record directly through the structured fields — that is the point of this chat: when an identification, schedule, or health check got something wrong, the owner tells you here and you fix it. Edit only what the owner asks for or plainly implies; when you're unsure what they mean, ask instead of guessing. Keep replies short and warm, like a knowledgeable friend texting back.
+
+Today: ${todayStr()}.
+The plant's record:
+- Name: "${plant.name}"${plant.location ? `, in "${plant.location}"` : ", no room set"}
+- Species: ${plant.species || g.name} (guide entry: ${g.key}${g.latin ? `, ${g.latin}` : ""})
+- Watering: every ${plant.waterEvery || "—"} days, last ${plant.lastWatered || "unknown"}. Fertilizing: every ${plant.fertEvery || "—"} days, last ${plant.lastFertilized || "never"}.
+- ${env}
+- Owner's notes: ${plant.notes || "(none)"}
+- Last health check: ${h ? `${h.at.slice(0, 10)} — ${h.score}/10 ${h.status}: ${h.summary}` : "(none)"}
+- Open checklist steps for this plant:
+${openTasks.map(t => `  · [id ${t.id}] ${t.title}${t.repeatDays ? ` (repeats every ${t.repeatDays}d)` : ""}${t.due ? ` (for ${t.due})` : ""}`).join("\n") || "  (none)"}
+- Recent care history:
+${describeCareHistory(logs) || "  (none recorded)"}
+- Guide entry says: ${g.light}. ${g.tips}`;
+
+  return askClaude({
+    system,
+    messages: transcript.map(m => ({ role: m.role, content: m.text })),
+    schema: chatSchema(),
+    effort: "low",
+    maxTokens: 6000,
+  });
+}
