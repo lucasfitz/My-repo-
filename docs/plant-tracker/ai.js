@@ -73,10 +73,55 @@ async function askClaude({ system, messages, schema, maxTokens = 8000, effort = 
   const textBlock = (data.content || []).find(b => b.type === "text");
   if (!textBlock) throw new Error("Empty response from the AI.");
   try {
-    return JSON.parse(textBlock.text);
+    return deepCleanText(JSON.parse(textBlock.text));
   } catch {
     throw new Error("The AI sent back something unreadable. Try again.");
   }
+}
+
+/* Text hygiene for everything the model writes.
+
+   Two real failures showed up on screen: a summary containing a literal
+   "—" (the model escaped the backslash, so JSON.parse decoded the
+   escape into a backslash and left the sequence as text), and a tofu box
+   where a broken surrogate landed mid-word. Schema constraints shape the
+   JSON, not the prose inside it — so the prose is cleaned here, once, for
+   every feature that talks to the model.
+
+   Order matters: escape sequences are decoded first (a decoded pair is a
+   legitimate emoji), and only then are the leftovers — lone surrogates,
+   replacement characters — stripped, because decoding can't repair those
+   and the box they render as is worse than their absence. */
+function cleanAIText(s) {
+  if (!/[\\\uD800-\uDFFF�]/.test(s)) return s;
+  let out = s;
+  // Surrogate-pair escapes as one unit, so emoji survive intact.
+  out = out.replace(/\\u([dD][89abAB][0-9a-fA-F]{2})\\u([dD][c-fC-F][0-9a-fA-F]{2})/g,
+    (m, hi, lo) => String.fromCharCode(parseInt(hi, 16), parseInt(lo, 16)));
+  out = out.replace(/\\u([0-9a-fA-F]{4})/g, (m, h) => {
+    const c = parseInt(h, 16);
+    return c >= 0xD800 && c <= 0xDFFF ? "" : String.fromCharCode(c);
+  });
+  out = out.replace(/\\n/g, "\n").replace(/\\t/g, " ")
+    .replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+  // Unpaired surrogates and replacement characters render as boxes.
+  out = out.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "");
+  out = out.replace(/([\uD800-\uDBFF])?([\uDC00-\uDFFF])/g, (m, hi, lo) => hi ? m : "");
+  out = out.replace(/�/g, "");
+  return out;
+}
+
+function deepCleanText(v) {
+  if (typeof v === "string") return cleanAIText(v);
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) v[i] = deepCleanText(v[i]);
+    return v;
+  }
+  if (v && typeof v === "object" && !(v instanceof Blob)) {
+    for (const k of Object.keys(v)) v[k] = deepCleanText(v[k]);
+    return v;
+  }
+  return v;
 }
 
 // ---------------------------------------------------------------------------
