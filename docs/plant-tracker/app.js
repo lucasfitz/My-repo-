@@ -839,7 +839,21 @@ async function viewToday() {
     if (!deck.length) return "";
     if (todayIndex >= deck.length) todayIndex = 0;
     if (todayIndex < 0) todayIndex = deck.length - 1;
+    /* The dealt card is pinned. Ticking one of its boxes re-renders, and the
+       re-sort (its urgency just dropped) used to land the same index on a
+       different plant — an advance nobody asked for, with work still open on
+       the card in hand. The card only changes when it has nothing left or
+       the owner skips; both paths clear the pin. */
+    if (todayPinned) {
+      const i = deck.findIndex(c => (c.plant ? c.plant.id : "loose") === todayPinned);
+      if (i !== -1) todayIndex = i;
+      // Finished. The index followed the pinned card through re-sorts, so it
+      // points somewhere arbitrary now — advance to the top of what's left
+      // (with the sticky room, that's the next plant where you're standing).
+      else { todayPinned = null; todayIndex = 0; }
+    }
     const card = deck[todayIndex];
+    todayPinned = card.plant ? card.plant.id : "loose";
     todayLastRoom = card.room;
 
     const late = card.rows.filter(r => r.kind === "care" && r.t.delta < 0);
@@ -1002,6 +1016,7 @@ async function viewToday() {
   if (deckRoom) deckRoom.addEventListener("change", async () => {
     todayRoom = deckRoom.value;
     todayIndex = 0;
+    todayPinned = null;
     render();
   });
 
@@ -1018,7 +1033,7 @@ async function viewToday() {
   };
 
   const deckSkip = document.getElementById("deckSkip");
-  if (deckSkip) deckSkip.addEventListener("click", () => { todayIndex++; nextCard(); });
+  if (deckSkip) deckSkip.addEventListener("click", () => { todayPinned = null; todayIndex++; nextCard(); });
 
   // One row at a time, awaited: two writes to the same plant in flight at once
   // would have the second overwrite the first's lastWatered.
@@ -1122,7 +1137,7 @@ async function viewToday() {
       buzz(dir > 0 ? [12, 40, 12] : 8);
       await new Promise(r => setTimeout(r, 210));
       if (dir > 0) await doAll();
-      else { todayIndex++; await nextCard(); }
+      else { todayPinned = null; todayIndex++; await nextCard(); }
     }, { passive: true });
   }
 
@@ -3272,6 +3287,9 @@ function setTopbarMode(onPlant) {
 let todayRoom = "";
 let todayIndex = 0;
 let todayLastRoom = null;
+// The card currently dealt (plant id, or "loose"). It holds its place through
+// re-renders until it is finished or skipped — see cardStack.
+let todayPinned = null;
 
 let renderedHash = null;
 
