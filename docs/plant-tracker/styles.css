@@ -984,3 +984,32 @@ body.sheet-open { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .chat-back, .chat { transition: none; }
 }
+
+/* ---------- Log activity: what happened, and when ---------- */
+.log-sheet {
+  width: 100%; max-width: 640px;
+  background: var(--ground); border-radius: 22px 22px 0 0;
+  padding-bottom: calc(14px + env(safe-area-inset-bottom));
+  transform: translateY(100%);
+  transition: transform .3s cubic-bezier(.2,.9,.3,1.02);
+}
+.chat-back.open .log-sheet { transform: none; }
+.log-body { padding: 16px 18px 0; display: grid; gap: 14px; }
+.log-kinds { display: flex; flex-wrap: wrap; gap: 8px; }
+.log-kind {
+  border: 1.5px solid var(--hairline); background: var(--surface); color: var(--ink);
+  border-radius: var(--r-pill); padding: 10px 16px; min-height: 44px;
+  font: inherit; font-size: 14.5px; font-weight: 620; letter-spacing: -0.01em;
+  cursor: pointer; transition: background .15s var(--ease), border-color .15s var(--ease), transform .1s var(--ease);
+}
+.log-kind:active { transform: scale(.95); }
+.log-kind.active { background: var(--ink); border-color: var(--ink); color: var(--ground); }
+.log-when { display: flex; gap: 8px; align-items: stretch; }
+.log-day {
+  flex: none; border: 1.5px solid var(--hairline); background: var(--surface); color: var(--ink);
+  border-radius: var(--r-field); padding: 10px 16px; min-height: 44px;
+  font: inherit; font-size: 14px; font-weight: 620; cursor: pointer;
+  transition: background .15s var(--ease), border-color .15s var(--ease);
+}
+.log-day.active { background: var(--ink); border-color: var(--ink); color: var(--ground); }
+#logDate { flex: 1; min-width: 0; }
