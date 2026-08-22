@@ -671,7 +671,8 @@ async function viewToday() {
     : "";
 
   const gh = gardenHealth(plants);
-  const series = healthSeries(await dbAll("logs"));
+  const allLogs = await dbAll("logs");
+  const series = healthSeries(allLogs);
   const spark = healthSparkline(series);
 
   let html = `
@@ -800,17 +801,16 @@ async function viewToday() {
      collects at the end instead of being filed under someone's guess. */
   const LOOSE = "\u0000loose";
 
-  /* One plant at a time.
+  /* The stack: every remaining card, visibly queued.
 
-     A list tells you everything at once, which is the right shape for
-     planning and the wrong one for doing. Working through a collection is a
-     sequence: stand in front of a plant, deal with it, move to the next. So
-     Today deals the work as a stack of cards — the plant you're looking at,
-     large enough to recognise from across the room, with its jobs as buttons
-     big enough to hit while holding a watering can.
-
-     The room picker filters the deck, because you work one room at a time and
-     the rest is noise while you're in it. */
+     One-card-at-a-time hid the shape of the day — you couldn't see how much
+     was left or what was coming. The stack shows the whole queue, worst room
+     first, one compact card per plant: photo, name, health, and its jobs as
+     pills. Swiping works per card — left sends it to the bottom of the queue,
+     right opens the camera for a fresh photo (which runs a health check) —
+     and tapping opens the full detail sheet where the long-form advice
+     lives. The room chips filter the queue, because you work one room at a
+     time and the rest is noise while you're in it. */
   const buildStack = () => {
     const rows = buildAgenda();
     const byPlant = new Map();
@@ -854,107 +854,106 @@ async function viewToday() {
     if (todayLastRoom && cards.some(c => c.room === todayLastRoom)) {
       cards.sort((a, b) => (a.room === todayLastRoom ? 0 : 1) - (b.room === todayLastRoom ? 0 : 1));
     }
+    // Skipped cards sink to the bottom, in the order they were skipped.
+    if (todayLater.length) {
+      const laterRank = c => { const i = todayLater.indexOf(cardKey(c)); return i === -1 ? -1 : i; };
+      cards.sort((a, b) => laterRank(a) - laterRank(b));
+    }
     return cards;
   };
 
+  const cardKey = c => c.plant ? c.plant.id : "loose";
+
   const roomLabel = room => room === LOOSE ? "Anything else" : room;
 
-  const cardStack = async () => {
-    const all = buildStack();
-    if (!all.length) return "";
-
-    // Rooms offered are the ones with work in them — a picker listing rooms
-    // that need nothing is a list of dead ends.
-    const rooms = [];
-    for (const c of all) if (!rooms.includes(c.room)) rooms.push(c.room);
-    if (todayRoom && !rooms.includes(todayRoom)) todayRoom = "";
-
-    const deck = todayRoom ? all.filter(c => c.room === todayRoom) : all;
-    if (!deck.length) return "";
-    if (todayIndex >= deck.length) todayIndex = 0;
-    if (todayIndex < 0) todayIndex = deck.length - 1;
-    /* The dealt card is pinned. Ticking one of its boxes re-renders, and the
-       re-sort (its urgency just dropped) used to land the same index on a
-       different plant — an advance nobody asked for, with work still open on
-       the card in hand. The card only changes when it has nothing left or
-       the owner skips; both paths clear the pin. */
-    if (todayPinned) {
-      const i = deck.findIndex(c => (c.plant ? c.plant.id : "loose") === todayPinned);
-      if (i !== -1) todayIndex = i;
-      // Finished. The index followed the pinned card through re-sorts, so it
-      // points somewhere arbitrary now — advance to the top of what's left
-      // (with the sticky room, that's the next plant where you're standing).
-      else { todayPinned = null; todayIndex = 0; }
+  // A pill is the compressed form of a job: verb for care, clipped title for
+  // a note. The full sentence lives one tap away in the sheet — a card you
+  // can read at arm's length beats a card that says everything.
+  const pillFor = r => {
+    if (r.kind === "care") {
+      const verb = r.t.kind === "water" ? "Water" : "Fertilize";
+      return `<button class="job ${r.t.kind}${r.t.delta < 0 ? " late" : ""}" data-plant="${r.t.plant.id}" data-kind="${r.t.kind}">
+        ${r.t.kind === "water" ? "💧" : "🌾"} ${verb}${r.t.delta < 0 ? ` · ${-r.t.delta}d late` : ""}</button>`;
     }
-    const card = deck[todayIndex];
-    todayPinned = card.plant ? card.plant.id : "loose";
-    todayLastRoom = card.room;
+    const icon = r.task.by === "Sprout AI" ? (ACTION_ICONS[r.task.kind] || "✦") : "📝";
+    return `<button class="job chore${r.task.repeatDays ? " repeat" : ""}" data-task="${r.task.id}">
+      ${icon} <span class="job-clip">${esc(r.task.title)}</span>${r.task.repeatDays ? " ↻" : ""}</button>`;
+  };
 
-    const late = card.rows.filter(r => r.kind === "care" && r.t.delta < 0);
-    const worst = late.length ? Math.min(...late.map(r => r.t.delta)) : null;
-    const photo = card.plant ? await latestPhotoURL(card.plant.id) : null;
-    const g = card.plant ? guideEntry(card.plant.speciesKey) : null;
+  const stack = buildStack();
+  // Rooms offered are the ones with work in them — a chip for a room that
+  // needs nothing is a dead end.
+  const rooms = [];
+  for (const c of stack) if (!rooms.includes(c.room)) rooms.push(c.room);
+  if (todayRoom && !rooms.includes(todayRoom)) todayRoom = "";
+  const visible = todayRoom ? stack.filter(c => c.room === todayRoom) : stack;
 
-    const actions = card.rows.map((r, i) => {
-      if (r.kind === "care") {
-        const verb = r.t.kind === "water" ? "Water" : "Fertilize";
-        return `<button class="deck-act" data-do="${i}" data-plant="${r.t.plant.id}" data-kind="${r.t.kind}">
-          <span class="deck-act-icon">${r.t.kind === "water" ? "💧" : "🌾"}</span>
-          <span class="deck-act-main"><b>${verb}</b><span class="deck-act-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}</span></span>
-          <span class="deck-tick">✓</span>
-        </button>`;
-      }
-      const act = `<button class="deck-act" data-do="${i}" data-task="${r.task.id}">
-        <span class="deck-act-icon">${r.task.by === "Sprout AI" ? (ACTION_ICONS[r.task.kind] || "✦") : "📝"}</span>
-        <span class="deck-act-main"><b>${esc(r.task.title)}</b>${
-          r.task.detail ? `<span class="deck-act-sub">${esc(r.task.detail)}</span>` : ""}${
-          r.task.repeatDays ? `<span class="deck-act-sub is-repeat">↻ every ${r.task.repeatDays}d — clears for today</span>` : ""}</span>
-        <span class="deck-tick">✓</span>
-      </button>`;
-      // A standing chore is never "done", so it never reaches the Done fold's
-      // ✕ — without its own way out it would repeat forever.
-      return r.task.repeatDays
-        ? `<div class="deck-act-wrap">${act}<button class="deck-drop" data-drop="${r.task.id}" aria-label="Stop repeating this">✕</button></div>`
-        : act;
-    }).join("");
+  /* Progress is what makes "clear the deck" a game you can win: everything
+     completed today over everything the day asked for. Distinct plant+kind
+     for care (watering twice is not two chores), tasks by their updatedAt. */
+  const careDoneToday = new Set(allLogs
+    .filter(l => (l.type === "water" || l.type === "fertilize") && l.at.slice(0, 10) === todayStr())
+    .map(l => l.plantId + "/" + l.type)).size;
+  const tasksDoneToday = custom.filter(t => t.done && (t.updatedAt || "").slice(0, 10) === todayStr()).length;
+  const doneCount = careDoneToday + tasksDoneToday;
+  const openCount = stack.reduce((n, c) => n + c.rows.length, 0);
+  const dayTotal = doneCount + openCount;
 
-    const doable = card.rows.length;
+  const cardStack = async () => {
+    if (!stack.length) return "";
+    const parts = [];
+    for (const card of visible) {
+      const late = card.rows.filter(r => r.kind === "care" && r.t.delta < 0);
+      const worst = late.length ? Math.min(...late.map(r => r.t.delta)) : null;
+      const photo = card.plant ? await latestPhotoURL(card.plant.id) : null;
+      const lastW = card.plant && card.plant.lastWatered
+        ? `Watered ${daysBetween(card.plant.lastWatered, todayStr()) === 0 ? "today" : daysBetween(card.plant.lastWatered, todayStr()) + "d ago"}`
+        : "";
+      parts.push(`
+      <div class="deck-card" data-card="${esc(cardKey(card))}">
+        <span class="deck-stamp is-photo" aria-hidden="true">📷 Photo</span>
+        <span class="deck-stamp is-later" aria-hidden="true">Skip</span>
+        <div class="deck-photo">
+          ${photo ? `<img src="${photo}" alt="" draggable="false">`
+                  : `<div class="deck-photo-none">${card.plant ? plantEmoji(card.plant) : "📋"}</div>`}
+          ${card.plant ? `<span class="deck-room-badge">${esc(roomLabel(card.room))}</span>` : ""}
+          ${worst !== null ? `<span class="deck-flag">${-worst}d overdue</span>` : ""}
+          ${card.plant ? `<button class="deck-cam" data-cam="${card.plant.id}" aria-label="Take a photo">📷</button>` : ""}
+        </div>
+        <div class="deck-body">
+          <div class="deck-head">
+            <div class="deck-title">
+              <h2 class="deck-name">${card.plant ? esc(card.plant.name) : "Anything else"}</h2>
+              <p class="deck-sub">${card.plant
+                ? esc(card.plant.species || guideEntry(card.plant.speciesKey).name)
+                : "Not tied to a plant"}</p>
+            </div>
+            <div class="deck-meta">
+              ${card.plant && card.plant.health ? healthChip(card.plant.health) : ""}
+              ${lastW ? `<span class="deck-lastw">${lastW}</span>` : ""}
+            </div>
+          </div>
+          <div class="deck-pills">${card.rows.map(pillFor).join("")}</div>
+        </div>
+      </div>`);
+    }
 
     return `
       <div class="deck-bar">
-        ${rooms.length > 1 ? `
-        <select id="deckRoom" class="deck-room" aria-label="Room">
-          <option value=""${todayRoom ? "" : " selected"}>All rooms · ${all.length}</option>
-          ${rooms.map(r => `<option value="${esc(r)}"${todayRoom === r ? " selected" : ""}>${
-            esc(roomLabel(r))} · ${all.filter(c => c.room === r).length}</option>`).join("")}
-        </select>` : `<span class="deck-only-room">${esc(roomLabel(rooms[0]))}</span>`}
-        <span class="deck-count">${todayIndex + 1} of ${deck.length}</span>
-      </div>
-
-      <div class="deck" id="deck">
-        <div class="deck-card">
-          <span class="deck-stamp is-done" aria-hidden="true">✓ Done</span>
-          <span class="deck-stamp is-later" aria-hidden="true">Later</span>
-          <div class="deck-photo">
-            ${photo ? `<img src="${photo}" alt="">`
-                    : `<div class="deck-photo-none">${card.plant ? plantEmoji(card.plant) : "📋"}</div>`}
-            ${worst !== null ? `<span class="deck-flag">${-worst}d overdue</span>` : ""}
-          </div>
-          <div class="deck-body">
-            <h2 class="deck-name">${card.plant ? esc(card.plant.name) : "Anything else"}</h2>
-            <p class="deck-sub">${card.plant
-              ? esc([card.plant.species || (g && g.name), roomLabel(card.room)].filter(Boolean).join(" · "))
-              : "Not tied to a plant"}</p>
-            <div class="deck-acts">${actions}</div>
-          </div>
+        <div class="room-chips">
+          ${rooms.length > 1 ? `<button class="room-chip${todayRoom ? "" : " active"}" data-room="">All · ${stack.length}</button>` : ""}
+          ${rooms.map(r => `<button class="room-chip${todayRoom === r ? " active" : ""}${rooms.length === 1 ? " active" : ""}" data-room="${esc(r)}">${
+            esc(roomLabel(r))} · ${stack.filter(c => c.room === r).length}</button>`).join("")}
         </div>
       </div>
-
-      <div class="deck-nav">
-        <button class="btn secondary" id="deckSkip">Skip</button>
-        ${doable ? `<button class="btn" id="deckAll">Did all ${doable > 1 ? doable : ""}</button>` : ""}
+      <div class="deck-progress">
+        <div class="deck-progress-bar"><i style="width:${dayTotal ? Math.round(doneCount / dayTotal * 100) : 0}%"></i></div>
+        <span class="deck-count">${visible.length} left</span>
       </div>
-      <p class="deck-hint">Swipe right when it's all done · left to come back to it</p>`;
+
+      <div class="deck" id="deck">${parts.join("")}</div>
+      <input type="file" id="deckCam" accept="image/*" capture="environment" hidden>
+      <p class="deck-hint">Tap a pill to do it · tap the card for the full story · swipe right for a photo, left to skip</p>`;
   };
 
   html += await cardStack();
@@ -1043,41 +1042,29 @@ async function viewToday() {
 
   $view().innerHTML = html;
 
-  /* The deck. Everything here re-renders after the record changes, which is
-     what advances the stack: a card with nothing left on it simply isn't dealt
-     again, and the same index lands on the next one. */
-  const deckRoom = document.getElementById("deckRoom");
-  if (deckRoom) deckRoom.addEventListener("change", async () => {
-    todayRoom = deckRoom.value;
-    todayIndex = 0;
-    todayPinned = null;
+  /* The deck. Everything re-renders after a record changes; a card with
+     nothing left on it simply isn't in the next deal, and render() keeps the
+     scroll position, so the list just gets shorter under your thumb. */
+  document.getElementById("cardSheet")?.remove(); // a sync mid-sheet would leave it stale
+
+  $view().querySelectorAll(".room-chip").forEach(ch => ch.addEventListener("click", () => {
+    todayRoom = ch.dataset.room;
     render();
-  });
+  }));
 
-  /* Dealing a new card should show it. Scroll preservation is right for a long
-     list — you finished something and want to stay put — but the deck is one
-     card, and keeping the old offset can leave the new one off-screen. */
-  const nextCard = async () => {
-    await render();
-    const bar = $view().querySelector(".deck-bar");
-    if (bar && bar.getBoundingClientRect().top < 0) bar.scrollIntoView({ block: "start" });
-    // The next card arrives like it was dealt, not like the page blinked.
-    const fresh = $view().querySelector(".deck-card");
-    if (fresh) fresh.classList.add("deal-in");
-  };
+  const byKey = new Map(stack.map(c => [cardKey(c), c]));
+  let lastDrag = 0;
 
-  const deckSkip = document.getElementById("deckSkip");
-  if (deckSkip) deckSkip.addEventListener("click", () => { todayPinned = null; todayIndex++; nextCard(); });
-
-  // One row at a time, awaited: two writes to the same plant in flight at once
-  // would have the second overwrite the first's lastWatered.
-  const doAct = async (el) => {
-    if (el.dataset.plant) await logAction(el.dataset.plant, el.dataset.kind);
-    else if (el.dataset.task) {
-      const t = await dbGet("tasks", el.dataset.task);
+  // One row at a time, awaited: two writes to the same plant in flight at
+  // once would have the second overwrite the first's lastWatered.
+  const doRow = async (card, r) => {
+    todayLastRoom = card.room;
+    if (r.kind === "care") await logAction(r.t.plant.id, r.t.kind);
+    else {
+      const t = await dbGet("tasks", r.task.id);
       if (!t) return;
       // A standing chore clears for today and books itself back in — done
-      // would end it, and deleting it is what the ✕ on the list is for.
+      // would end it, and the ✕ in the sheet is how it stops for good.
       if (t.repeatDays > 0) {
         t.due = addDays(todayStr(), t.repeatDays);
         toast(`Done — back on ${fmtDate(t.due)}`);
@@ -1085,64 +1072,172 @@ async function viewToday() {
       await saveRecord("tasks", t);
     }
   };
-  const doAll = async () => {
-    for (const el of [...$view().querySelectorAll(".deck-act[data-do]")]) await doAct(el);
-    await nextCard();
+
+  const rowForEl = (card, el) => card.rows.find(r => r.kind === "care"
+    ? el.dataset.kind && r.t.plant.id === el.dataset.plant && r.t.kind === el.dataset.kind
+    : el.dataset.task && r.task.id === el.dataset.task);
+
+  // Pills complete their job in place — the fast path for "water it, move on".
+  $view().querySelectorAll(".job").forEach(el => el.addEventListener("click", async e => {
+    e.stopPropagation();
+    const card = byKey.get(el.closest(".deck-card").dataset.card);
+    const row = card && rowForEl(card, el);
+    if (!row) return;
+    buzz(8);
+    await doRow(card, row);
+    render();
+  }));
+
+  /* The camera on the card: a fresh photo is the day's best gift to the
+     health history, and it triggers a check on its own. One shared input —
+     `capture` sends iPhones straight to the camera. */
+  const deckCam = document.getElementById("deckCam");
+  let camPlant = null;
+  $view().querySelectorAll(".deck-cam[data-cam]").forEach(b => b.addEventListener("click", e => {
+    e.stopPropagation();
+    camPlant = b.dataset.cam;
+    deckCam.click();
+  }));
+  if (deckCam) deckCam.addEventListener("change", async () => {
+    const f = deckCam.files && deckCam.files[0];
+    if (!f || !camPlant) return;
+    await addPhoto(camPlant, f);
+    toast(aiConfigured() ? "Photo saved — health check running" : "Photo saved");
+    render();
+  });
+
+  /* The sheet: the card's full story. Pills compress; this is where the long
+     step reads in whole sentences with its reasoning, where a standing chore
+     can be stopped, and where the species' own care notes sit. */
+  const openSheet = async (card) => {
+    document.getElementById("cardSheet")?.remove();
+    const g = card.plant ? guideEntry(card.plant.speciesKey) : null;
+    const photo = card.plant ? await latestPhotoURL(card.plant.id) : null;
+    const rowsHtml = card.rows.map((r, i) => {
+      if (r.kind === "care") {
+        const verb = r.t.kind === "water" ? "Water" : "Fertilize";
+        return `<button class="deck-act" data-row="${i}" data-kind="${r.t.kind}">
+          <span class="deck-act-icon">${r.t.kind === "water" ? "💧" : "🌾"}</span>
+          <span class="deck-act-main"><b>${verb}</b><span class="deck-act-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}${r.wxTag || ""}</span></span>
+          <span class="deck-tick">✓</span>
+        </button>`;
+      }
+      const btn = `<button class="deck-act" data-row="${i}">
+        <span class="deck-act-icon">${r.task.by === "Sprout AI" ? (ACTION_ICONS[r.task.kind] || "✦") : "📝"}</span>
+        <span class="deck-act-main"><b>${esc(r.task.title)}</b>${
+          r.task.detail ? `<span class="deck-act-sub">${esc(r.task.detail)}</span>` : ""}${
+          r.task.repeatDays ? `<span class="deck-act-sub is-repeat">↻ every ${r.task.repeatDays}d — clears for today</span>` : ""}</span>
+        <span class="deck-tick">✓</span>
+      </button>`;
+      return r.task.repeatDays
+        ? `<div class="deck-act-wrap">${btn}<button class="deck-drop" data-drop="${r.task.id}" aria-label="Stop repeating this">✕</button></div>`
+        : btn;
+    }).join("");
+
+    const el = document.createElement("div");
+    el.id = "cardSheet";
+    el.className = "sheet-back";
+    el.innerHTML = `
+      <div class="sheet" role="dialog" aria-label="${card.plant ? esc(card.plant.name) : "Checklist"}">
+        <div class="sheet-grip"></div>
+        <div class="sheet-head">
+          ${photo ? `<img class="sheet-thumb" src="${photo}" alt="">`
+                  : `<div class="sheet-thumb" style="display:grid;place-items:center">${card.plant ? plantEmoji(card.plant) : "📋"}</div>`}
+          <div class="sheet-title">
+            <b>${card.plant ? esc(card.plant.name) : "Anything else"}</b>
+            <span>${card.plant
+              ? esc([card.plant.species || (g && g.name), roomLabel(card.room)].filter(Boolean).join(" · "))
+              : "Not tied to a plant"}</span>
+          </div>
+          <button class="sheet-close" aria-label="Close">✕</button>
+        </div>
+        <div class="sheet-body">
+          ${rowsHtml}
+          ${card.plant && card.plant.health && card.plant.health.summary
+            ? `<div class="sheet-tip">${healthChip(card.plant.health)} ${esc(card.plant.health.summary)}</div>` : ""}
+          ${g && g.tips && g.key !== "other" ? `<div class="sheet-tip"><b>Tip</b> — ${esc(g.tips)}</div>` : ""}
+        </div>
+        <div class="sheet-foot">
+          <button class="btn block" id="sheetAll">Did all ${card.rows.length > 1 ? card.rows.length : ""}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+    requestAnimationFrame(() => el.classList.add("open"));
+
+    const done = new Set();
+    const closeAnd = () => { el.remove(); render(); };
+    el.addEventListener("click", e => { if (e.target === el) closeAnd(); });
+    el.querySelector(".sheet-close").addEventListener("click", closeAnd);
+    el.querySelectorAll(".deck-act[data-row]").forEach(btn => btn.addEventListener("click", async () => {
+      const i = Number(btn.dataset.row);
+      if (done.has(i)) return;
+      done.add(i);
+      buzz(8);
+      await doRow(card, card.rows[i]);
+      btn.classList.add("is-done-row");
+      btn.disabled = true;
+      if (done.size === card.rows.length) closeAnd();
+    }));
+    el.querySelectorAll(".deck-drop[data-drop]").forEach(btn => btn.addEventListener("click", async () => {
+      await removeRecord("tasks", btn.dataset.drop);
+      toast("Okay — it won't come back");
+      closeAnd();
+    }));
+    el.querySelector("#sheetAll").addEventListener("click", async () => {
+      buzz([12, 40, 12]);
+      for (let i = 0; i < card.rows.length; i++) if (!done.has(i)) await doRow(card, card.rows[i]);
+      closeAnd();
+    });
   };
 
-  $view().querySelectorAll(".deck-act[data-do]").forEach(el => {
-    el.addEventListener("click", async () => { buzz(8); await doAct(el); await nextCard(); });
-  });
-  const deckAll = document.getElementById("deckAll");
-  if (deckAll) deckAll.addEventListener("click", () => { buzz([12, 40, 12]); doAll(); });
-
-  $view().querySelectorAll(".deck-drop[data-drop]").forEach(el => {
-    el.addEventListener("click", async () => {
-      await removeRecord("tasks", el.dataset.drop);
-      toast("Okay — it won't come back");
-      nextCard();
+  $view().querySelectorAll(".deck-card").forEach(cardEl => {
+    cardEl.addEventListener("click", () => {
+      if (Date.now() - lastDrag < 400) return; // the click that trails a swipe
+      const card = byKey.get(cardEl.dataset.card);
+      if (card) openSheet(card);
     });
   });
 
-  /* The card follows the finger.
+  /* Swipes, per card, the reference design's way: drag right and the card
+     asks for a photo (which runs a health check); drag left and it sinks to
+     the bottom of the queue to come back around. Completion lives on the
+     pills and in the sheet — a gesture this easy to fire shouldn't be the
+     thing that writes records.
 
-     A swipe that only registers on release reads as a button you can't see;
-     dragging the card itself, with the stamp fading in and a tick at the
-     point of no return, is the gesture saying what it will do before it does
-     it. Left files the card for later, right marks everything on it done —
-     same meanings the release-only version had.
-
-     touch-action: pan-y leaves vertical scrolling native, so the gesture is
-     only claimed once it is clearly horizontal, and a scroll that drifts
-     sideways never moves the card. */
+     touch-action: pan-y leaves vertical scrolling native; the gesture is
+     only claimed once it is clearly horizontal. */
   const deck = document.getElementById("deck");
-  const cardEl = deck && deck.querySelector(".deck-card");
-  if (cardEl) {
-    const stampDone = cardEl.querySelector(".deck-stamp.is-done");
-    const stampLater = cardEl.querySelector(".deck-stamp.is-later");
+  if (deck) {
     const COMMIT = Math.min(120, Math.round(deck.clientWidth * 0.34)) || 100;
-    let sx = 0, sy = 0, dx = 0, mode = null, armed = false;
+    let cardEl = null, stamps = null, sx = 0, sy = 0, dx = 0, mode = null, armed = false;
 
     const follow = x => {
-      cardEl.style.transform = x ? `translateX(${x}px) rotate(${(x / 22).toFixed(2)}deg)` : "";
+      if (!cardEl) return;
+      cardEl.style.transform = x ? `translateX(${x}px) rotate(${(x / 26).toFixed(2)}deg)` : "";
       const p = Math.min(1, Math.abs(x) / COMMIT);
-      stampDone.style.opacity = x > 0 ? p : 0;
-      stampLater.style.opacity = x < 0 ? p : 0;
+      stamps.photo.style.opacity = x > 0 && cardEl.querySelector(".deck-cam") ? p : 0;
+      stamps.later.style.opacity = x < 0 ? p : 0;
     };
     const settle = () => {
+      if (!cardEl) return;
       cardEl.style.transition = "transform .3s cubic-bezier(.2,.9,.3,1.18)";
       follow(0);
     };
 
     deck.addEventListener("touchstart", e => {
-      if (e.touches.length !== 1) { mode = "scroll"; return; }
+      cardEl = e.target.closest(".deck-card");
+      if (!cardEl || e.touches.length !== 1) { mode = "scroll"; return; }
+      stamps = {
+        photo: cardEl.querySelector(".deck-stamp.is-photo"),
+        later: cardEl.querySelector(".deck-stamp.is-later"),
+      };
       sx = e.touches[0].clientX; sy = e.touches[0].clientY;
       dx = 0; mode = null; armed = false;
       cardEl.style.transition = "none";
     }, { passive: true });
 
     deck.addEventListener("touchmove", e => {
-      if (mode === "scroll") return;
+      if (mode === "scroll" || !cardEl) return;
       const t = e.touches[0];
       dx = t.clientX - sx;
       const dy = t.clientY - sy;
@@ -1152,8 +1247,7 @@ async function viewToday() {
         else return;
       }
       follow(dx);
-      // One tick at the threshold, like a switch — and it un-arms if the
-      // finger retreats, so hovering on the line doesn't rattle.
+      // One tick at the threshold — and it un-arms if the finger retreats.
       if (!armed && Math.abs(dx) >= COMMIT) { armed = true; buzz(8); }
       else if (armed && Math.abs(dx) < COMMIT) armed = false;
     }, { passive: true });
@@ -1161,17 +1255,30 @@ async function viewToday() {
     deck.addEventListener("touchcancel", () => { if (mode === "drag") settle(); mode = null; }, { passive: true });
 
     deck.addEventListener("touchend", async () => {
-      if (mode !== "drag") { mode = null; return; }
+      if (mode !== "drag" || !cardEl) { mode = null; return; }
       mode = null;
+      lastDrag = Date.now();
       if (Math.abs(dx) < COMMIT) { settle(); return; }
-      const dir = dx > 0 ? 1 : -1;
-      cardEl.style.transition = "transform .22s ease-in, opacity .22s ease-in";
-      cardEl.style.transform = `translateX(${dir * 120}%) rotate(${dir * 9}deg)`;
+      const card = byKey.get(cardEl.dataset.card);
+      if (dx > 0) {
+        // Photo: the card springs back and the camera opens.
+        settle();
+        buzz(8);
+        if (card && card.plant) { camPlant = card.plant.id; deckCam.click(); }
+        return;
+      }
+      // Skip: off to the left, then to the bottom of the queue.
+      cardEl.style.transition = "transform .28s ease-in, opacity .28s ease-in";
+      cardEl.style.transform = "translateX(-120%) rotate(-8deg)";
       cardEl.style.opacity = "0";
-      buzz(dir > 0 ? [12, 40, 12] : 8);
-      await new Promise(r => setTimeout(r, 210));
-      if (dir > 0) await doAll();
-      else { todayPinned = null; todayIndex++; await nextCard(); }
+      buzz(8);
+      await new Promise(r => setTimeout(r, 240));
+      if (card) {
+        const k = cardKey(card);
+        todayLater = todayLater.filter(x => x !== k);
+        todayLater.push(k);
+      }
+      render();
     }, { passive: true });
   }
 
@@ -3576,11 +3683,10 @@ function setTopbarMode(onPlant) {
 /* Where you are in the deck. Module-level because completing something
    re-renders the whole view, and the card you were on has to survive that. */
 let todayRoom = "";
-let todayIndex = 0;
 let todayLastRoom = null;
-// The card currently dealt (plant id, or "loose"). It holds its place through
-// re-renders until it is finished or skipped — see cardStack.
-let todayPinned = null;
+// Cards swiped "skip" this session sink to the bottom of the queue — the
+// deck comes back around to them rather than dropping them.
+let todayLater = [];
 
 let renderedHash = null;
 
