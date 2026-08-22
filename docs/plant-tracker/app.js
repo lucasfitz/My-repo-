@@ -2140,6 +2140,96 @@ async function materializeHealthTasks(plant) {
   await saveRecord("plants", plant);
 }
 
+/* Apply what the chat decided, and say what happened in words.
+
+   Everything is validated here rather than trusted: intervals clamp to sane
+   ranges, dates must be real dates, species keys must exist in the guide.
+   The returned strings drive the chips under the reply and the history log —
+   the record of an AI edit belongs in the plant's history, same as an
+   assessment. */
+async function applyChatChanges(plantId, res) {
+  const plant = await dbGet("plants", plantId);
+  if (!plant) return [];
+  const changes = [];
+  const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s) && s <= todayStr();
+
+  if (res.set_name && res.set_name.trim() && res.set_name.trim() !== plant.name) {
+    changes.push(`name "${plant.name}" → "${res.set_name.trim()}"`);
+    plant.name = res.set_name.trim();
+  }
+  if (res.set_room && res.set_room.trim() && res.set_room.trim() !== (plant.location || "")) {
+    changes.push(`room → ${res.set_room.trim()}`);
+    plant.location = res.set_room.trim();
+  }
+  if (res.set_species_key && res.set_species_key !== plant.speciesKey) {
+    const g = guideEntry(res.set_species_key);
+    if (g) {
+      const label = (res.set_species_name || "").trim() || g.name;
+      changes.push(`species → ${label}`);
+      plant.speciesKey = res.set_species_key;
+      plant.species = label;
+    }
+  }
+  const setEvery = (field, v, label) => {
+    if (!Number.isInteger(v) || v < 0 || v > 365 || v === plant[field]) return;
+    changes.push(`${label} every ${plant[field] || "—"}d → ${v ? v + "d" : "off"}`);
+    plant[field] = v;
+  };
+  setEvery("waterEvery", res.set_water_every_days, "water");
+  setEvery("fertEvery", res.set_fert_every_days, "fertilize");
+  if (res.set_last_watered && isDate(res.set_last_watered) && res.set_last_watered !== plant.lastWatered) {
+    changes.push(`last watered → ${fmtDate(res.set_last_watered)}`);
+    plant.lastWatered = res.set_last_watered;
+  }
+  if (res.set_last_fertilized && isDate(res.set_last_fertilized) && res.set_last_fertilized !== plant.lastFertilized) {
+    changes.push(`last fertilized → ${fmtDate(res.set_last_fertilized)}`);
+    plant.lastFertilized = res.set_last_fertilized;
+  }
+  if (res.set_outdoor === "outdoor" && !isOutdoorPlant(plant)) { plant.outdoor = true; changes.push("lives outdoors now"); }
+  if (res.set_outdoor === "indoor" && isOutdoorPlant(plant)) { plant.outdoor = false; changes.push("lives indoors now"); }
+  if (res.set_notes && res.set_notes.trim() && res.set_notes.trim() !== (plant.notes || "")) {
+    plant.notes = res.set_notes.trim();
+    changes.push("notes updated");
+  }
+  if (res.clear_health && plant.health) {
+    delete plant.health;
+    changes.push("health assessment cleared");
+  }
+  if (changes.length) await saveRecord("plants", plant);
+
+  for (const a of res.add_tasks || []) {
+    if (!a.title || !a.title.trim()) continue;
+    await saveRecord("tasks", {
+      id: uid(), title: a.title.trim(), detail: a.detail || "", done: false,
+      by: "Sprout AI", kind: a.kind || "", plantId: plant.id, plantName: plant.name,
+      ...actionSchedule(a), createdAt: new Date().toISOString(),
+    });
+    changes.push(`added: ${a.title.trim()}`);
+  }
+  for (const tid of res.complete_task_ids || []) {
+    const t = await dbGet("tasks", tid);
+    if (!t || t.plantId !== plant.id || t.done) continue;
+    if (t.repeatDays > 0) t.due = addDays(todayStr(), t.repeatDays);
+    else t.done = true;
+    await saveRecord("tasks", t);
+    changes.push(`done: ${t.title}`);
+  }
+  for (const tid of res.drop_task_ids || []) {
+    const t = await dbGet("tasks", tid);
+    if (!t || t.plantId !== plant.id) continue;
+    await removeRecord("tasks", tid);
+    changes.push(`removed: ${t.title}`);
+  }
+
+  if (changes.length) {
+    await saveRecord("logs", {
+      id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(),
+      by: "Sprout AI", note: `Updated from chat — ${changes.join("; ")}`,
+    });
+  }
+  return changes;
+}
+
 async function applyStepToPlan(plant, action) {
   const changes = [];
   if (action.water_every_days > 0 && action.water_every_days !== plant.waterEvery) {
@@ -2158,6 +2248,80 @@ async function applyStepToPlan(plant, action) {
     note: `Care plan updated from a health check — ${changes.join("; ")}`,
   });
   return changes.join("; ");
+}
+
+/* The chat panel. Lives outside #view so the page behind can re-render as
+   edits land — which it does after every applied change, so closing the
+   panel never reveals a stale page. Transcript is per-visit: the record
+   keeps the changes (and the history keeps a line per edit); the
+   conversation itself isn't something to sync or store. */
+function openPlantChat(plantId, plantName) {
+  document.getElementById("plantChat")?.remove();
+  const transcript = [];
+  const el = document.createElement("div");
+  el.id = "plantChat";
+  el.className = "chat-back";
+  el.innerHTML = `
+    <div class="chat" role="dialog" aria-label="Chat about ${esc(plantName)}">
+      <div class="chat-head">
+        <div class="chat-title"><b>${esc(plantName)}</b><span>Ask anything — it can fix the record too</span></div>
+        <button class="chat-close" id="chatClose" aria-label="Close">✕</button>
+      </div>
+      <div class="chat-log" id="chatLog">
+        <div class="msg ai">What's going on with ${esc(plantName)}? If something in here is wrong — species, schedule, a health check that missed — tell me and I'll fix it.</div>
+      </div>
+      <form class="chat-input" id="chatForm">
+        <input type="text" id="chatText" placeholder="e.g. This is actually a hoya…" autocomplete="off" maxlength="600">
+        <button class="btn" type="submit">Send</button>
+      </form>
+    </div>`;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("open"));
+
+  const log = el.querySelector("#chatLog");
+  const input = el.querySelector("#chatText");
+  const form = el.querySelector("#chatForm");
+  const close = () => el.remove();
+  el.addEventListener("click", e => { if (e.target === el) close(); });
+  el.querySelector("#chatClose").addEventListener("click", close);
+
+  const bubble = (cls, html) => {
+    const d = document.createElement("div");
+    d.className = "msg " + cls;
+    d.innerHTML = html;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+    return d;
+  };
+
+  form.addEventListener("submit", async e => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || form.dataset.busy) return;
+    form.dataset.busy = "1";
+    input.value = "";
+    transcript.push({ role: "user", text });
+    bubble("user", esc(text));
+    const wait = bubble("ai thinking", "Thinking…");
+    try {
+      const res = await aiPlantChat(plantId, transcript);
+      transcript.push({ role: "assistant", text: res.reply });
+      const applied = await applyChatChanges(plantId, res);
+      wait.remove();
+      bubble("ai", esc(res.reply) + (applied.length
+        ? `<div class="msg-changes">${applied.map(c => `<span class="msg-change">✓ ${esc(c)}</span>`).join("")}</div>`
+        : ""));
+      if (applied.length) { buzz(8); render(); }
+    } catch (err) {
+      wait.remove();
+      bubble("ai", `⚠️ ${esc(err.message)}`);
+      transcript.pop(); // the turn never happened; let them send it again
+    } finally {
+      delete form.dataset.busy;
+      input.focus();
+    }
+  });
+  input.focus();
 }
 
 function wireSteps(box, plant) {
@@ -2322,8 +2486,11 @@ async function viewPlant(id) {
           : "Claude reads the photos, care history, and conditions to assess health and turn what it finds into steps."
         : "Add your Anthropic API key in Settings to enable AI health checks."}</p>
       ${aiConfigured()
-        ? `<button class="btn secondary" id="btnAiCheck"${assessInFlight(p.id) ? " disabled" : ""}>${
-             assessInFlight(p.id) ? "Looking at your plant…" : p.health ? "Check again" : "Check health"}</button>
+        ? `<div class="action-row" style="margin:0 0 4px">
+             <button class="btn secondary" id="btnAiCheck"${assessInFlight(p.id) ? " disabled" : ""}>${
+               assessInFlight(p.id) ? "Looking at your plant…" : p.health ? "Check again" : "Check health"}</button>
+             <button class="btn secondary" id="btnPlantChat">💬 Ask about it</button>
+           </div>
            <div id="aiResult">${p.health ? renderAssessment(p.health, { plantId: p.id, addedIds }) : ""}</div>`
         : `<a class="btn small secondary" href="#/settings">Set up in Settings</a>`}
     </div>
@@ -2387,6 +2554,9 @@ async function viewPlant(id) {
       }
     });
   }
+
+  const btnChat = document.getElementById("btnPlantChat");
+  if (btnChat) btnChat.addEventListener("click", () => openPlantChat(id, p.name));
 
   const act = async (type) => { await logAction(id, type); render(); };
   document.getElementById("btnWater").addEventListener("click", () => act("water"));
