@@ -3463,10 +3463,27 @@ let todayPinned = null;
 
 let renderedHash = null;
 
+/* The tabs remember where you left them. Going into a plant from halfway
+   down the collection and coming back used to land at the top — scroll back
+   down, find your spot, every single time. Each tab screen now saves its
+   offset on the way out and restores it on the way back, the way native
+   tabs behave.
+
+   Detail screens deliberately don't: a plant page, the add flow, an edit
+   form all read from the top, and swiping plant-to-plant starts each one
+   fresh. If the list shrank while you were away the browser clamps the
+   restore to what's there. Session-only — a fresh open starts at the top. */
+const SCROLL_MEMORY = new Map();
+const remembersScroll = h => /^#\/(today|plants|guide|settings)$/.test(h);
+
 async function render() {
   const hash = location.hash || "#/today";
   const sameScreen = hash === renderedHash;
-  const keepAt = sameScreen ? window.scrollY : 0;
+  if (!sameScreen && renderedHash && remembersScroll(renderedHash)) {
+    SCROLL_MEMORY.set(renderedHash, window.scrollY);
+  }
+  const keepAt = sameScreen ? window.scrollY
+    : remembersScroll(hash) ? (SCROLL_MEMORY.get(hash) || 0) : 0;
   renderedHash = hash;
   const route = routes.find(r => r.re.test(hash)) || routes[0];
   const m = hash.match(route.re);
