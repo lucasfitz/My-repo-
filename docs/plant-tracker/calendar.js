@@ -56,7 +56,12 @@ function projectCare(plants, days = CAL_HORIZON_DAYS) {
       if (date < today) date = today;
       while (date <= limit) {
         (byDate[date] = byDate[date] || []).push({ name: p.name, kind });
-        date = addDays(date, every);
+        // Each repeat re-snaps to the rhythm — adding the raw interval alone
+        // holds the rhythm for one event and then drifts back off it. The
+        // guard keeps a backward snap from ever re-landing on the same day.
+        const next = addDays(date, every);
+        const snapped = snapToWaterDay(next, every);
+        date = snapped > date ? snapped : next;
       }
     }
   }
