@@ -300,12 +300,20 @@ function maxWaterGap(days) {
   return max;
 }
 
-/* Move a watering date back to the most recent watering day.
+/* Move a watering date onto the rhythm.
 
-   Backwards, not forwards: a little early is harmless, whereas rounding up to
-   the next slot could leave a thirsty plant dry for most of a week. A plant
-   that needs water more often than the rhythm's longest gap can't be served by
-   it at all — outdoor pots in summer, mostly — so it keeps its own schedule. */
+   Backwards by preference: a little early is harmless, whereas a plant left
+   dry past its day is the failure the schedule exists to prevent. A plant
+   that needs water more often than the rhythm's longest gap can't be served
+   by it at all, so it keeps its own schedule.
+
+   One exception to backwards: when the backward snap would land in the past,
+   a plant that isn't even due yet would surface as "overdue" — a deck full
+   of invented work on a day that isn't a watering day at all, which is the
+   opposite of what a rhythm promises. A not-yet-due plant rolls forward to
+   the next watering day instead; the floor rule (interval ≥ longest gap)
+   is exactly what makes that bounded wait safe. Genuinely overdue stays
+   overdue — that work is real. */
 function snapToWaterDay(dateStr, every) {
   const days = waterDays();
   if (!days.length || every < maxWaterGap(days)) return dateStr;
@@ -314,7 +322,14 @@ function snapToWaterDay(dateStr, every) {
     if (days.includes(d.getDay())) break;
     d.setDate(d.getDate() - 1);
   }
-  return d.toISOString().slice(0, 10);
+  const snapped = d.toISOString().slice(0, 10);
+  if (snapped >= todayStr() || dateStr < todayStr()) return snapped;
+  const f = new Date(dateStr + "T12:00:00");
+  for (let i = 0; i < 7; i++) {
+    if (days.includes(f.getDay())) break;
+    f.setDate(f.getDate() + 1);
+  }
+  return f.toISOString().slice(0, 10);
 }
 
 /* Raise anything that wants water more often than the rhythm can give it.
@@ -324,17 +339,27 @@ function snapToWaterDay(dateStr, every) {
    on the list mid-week. Moving it up to the rhythm's longest gap is what
    actually makes twice a week the whole story.
 
-   Only ever raises — a cactus on 90 days is left alone. Outdoor plants are
-   included, but the seasonal adjustment still shortens their interval in
-   summer, so a hot-weather pot can drift back off the rhythm on its own. */
+   The comparison uses the interval as it is actually lived: outdoor plants
+   run tighter in summer (seasonFactor), so a pot raised to the bare floor in
+   August would be shrunk right back below it at render time and fall off the
+   rhythm the moment the button was pressed — which read, correctly, as "this
+   button does nothing". The raw interval is raised until the seasonal
+   effective interval clears the floor.
+
+   Only ever raises — a cactus on 90 days is left alone. */
 async function applyWaterRhythm() {
   const floor = maxWaterGap(waterDays());
   if (!Number.isFinite(floor)) return [];
   const changed = [];
   for (const p of await dbAll("plants")) {
-    if (p.archived || !p.waterEvery || p.waterEvery >= floor) continue;
-    changed.push({ name: p.name, from: p.waterEvery, to: floor });
-    p.waterEvery = floor;
+    if (p.archived || !p.waterEvery) continue;
+    const factor = isOutdoorPlant(p) ? seasonFactor() : 1;
+    const lived = e => Math.max(1, Math.round(e * factor));
+    if (lived(p.waterEvery) >= floor) continue;
+    let raw = Math.max(p.waterEvery + 1, Math.ceil(floor / factor));
+    while (lived(raw) < floor) raw++;
+    changed.push({ name: p.name, from: p.waterEvery, to: raw });
+    p.waterEvery = raw;
     await saveRecord("plants", p);
   }
   return changed;
@@ -354,7 +379,10 @@ function nextDue(plant, kind) {
   const last = kind === "water" ? plant.lastWatered : plant.lastFertilized;
   const base = last || plant.createdAt.slice(0, 10);
   const due = addDays(base, every);
-  return kind === "water" ? snapToWaterDay(due, every) : due;
+  // Fertilizing happens standing at the plant with the can — it belongs on
+  // watering days too, or the calendar keeps sprouting lone mid-week chips
+  // that the rhythm was supposed to have cleared away.
+  return snapToWaterDay(due, every);
 }
 
 // ---------------------------------------------------------------------------
@@ -377,16 +405,22 @@ function computeCareTasks(plants) {
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
-async function logAction(plantId, type, note = "") {
+/* `date` lets care be logged on the day it actually happened, not the day it
+   got written down — "I watered everything Tuesday" on Thursday. A backdated
+   watering never moves lastWatered backwards: the newest real watering is
+   what the schedule runs on. */
+async function logAction(plantId, type, note = "", { date = todayStr(), quiet = false } = {}) {
   const plant = await dbGet("plants", plantId);
   if (!plant) return;
-  const now = new Date().toISOString();
-  if (type === "water") plant.lastWatered = todayStr();
-  if (type === "fertilize") plant.lastFertilized = todayStr();
+  const at = date === todayStr()
+    ? new Date().toISOString()
+    : new Date(date + "T12:00:00").toISOString();
+  if (type === "water" && (!plant.lastWatered || date > plant.lastWatered)) plant.lastWatered = date;
+  if (type === "fertilize" && (!plant.lastFertilized || date > plant.lastFertilized)) plant.lastFertilized = date;
   await saveRecord("plants", plant);
-  await saveRecord("logs", { id: uid(), plantId, type, at: now, by: state.settings.activeUser, note });
+  await saveRecord("logs", { id: uid(), plantId, type, at, by: state.settings.activeUser, note });
   const verbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned", note: "Noted" };
-  toast(`${verbs[type] || type} ${plant.name}`);
+  if (!quiet) toast(`${verbs[type] || type} ${plant.name}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -453,9 +487,13 @@ function resizeImage(file, maxDim = 1400) {
    here — re-importing a collection shouldn't fire a check per plant.
 
    `resize: false` is for a blob that's already been through resizeImage(). */
-async function addPhoto(plantId, file, { assess = true, resize = true } = {}) {
+/* `batch` ties photos picked in one go into one journal entry — five angles
+   of the same plant on the same afternoon are one visit, not five. */
+async function addPhoto(plantId, file, { assess = true, resize = true, batch = null } = {}) {
   const blob = resize ? await resizeImage(file) : file;
-  await saveRecord("photos", { id: uid(), plantId, blob, createdAt: new Date().toISOString() });
+  const rec = { id: uid(), plantId, blob, createdAt: new Date().toISOString() };
+  if (batch) rec.batch = batch;
+  await saveRecord("photos", rec);
   if (assess) autoAssess(plantId);
 }
 
@@ -2243,6 +2281,96 @@ async function materializeHealthTasks(plant) {
   await saveRecord("plants", plant);
 }
 
+/* Apply what the chat decided, and say what happened in words.
+
+   Everything is validated here rather than trusted: intervals clamp to sane
+   ranges, dates must be real dates, species keys must exist in the guide.
+   The returned strings drive the chips under the reply and the history log —
+   the record of an AI edit belongs in the plant's history, same as an
+   assessment. */
+async function applyChatChanges(plantId, res) {
+  const plant = await dbGet("plants", plantId);
+  if (!plant) return [];
+  const changes = [];
+  const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s) && s <= todayStr();
+
+  if (res.set_name && res.set_name.trim() && res.set_name.trim() !== plant.name) {
+    changes.push(`name "${plant.name}" → "${res.set_name.trim()}"`);
+    plant.name = res.set_name.trim();
+  }
+  if (res.set_room && res.set_room.trim() && res.set_room.trim() !== (plant.location || "")) {
+    changes.push(`room → ${res.set_room.trim()}`);
+    plant.location = res.set_room.trim();
+  }
+  if (res.set_species_key && res.set_species_key !== plant.speciesKey) {
+    const g = guideEntry(res.set_species_key);
+    if (g) {
+      const label = (res.set_species_name || "").trim() || g.name;
+      changes.push(`species → ${label}`);
+      plant.speciesKey = res.set_species_key;
+      plant.species = label;
+    }
+  }
+  const setEvery = (field, v, label) => {
+    if (!Number.isInteger(v) || v < 0 || v > 365 || v === plant[field]) return;
+    changes.push(`${label} every ${plant[field] || "—"}d → ${v ? v + "d" : "off"}`);
+    plant[field] = v;
+  };
+  setEvery("waterEvery", res.set_water_every_days, "water");
+  setEvery("fertEvery", res.set_fert_every_days, "fertilize");
+  if (res.set_last_watered && isDate(res.set_last_watered) && res.set_last_watered !== plant.lastWatered) {
+    changes.push(`last watered → ${fmtDate(res.set_last_watered)}`);
+    plant.lastWatered = res.set_last_watered;
+  }
+  if (res.set_last_fertilized && isDate(res.set_last_fertilized) && res.set_last_fertilized !== plant.lastFertilized) {
+    changes.push(`last fertilized → ${fmtDate(res.set_last_fertilized)}`);
+    plant.lastFertilized = res.set_last_fertilized;
+  }
+  if (res.set_outdoor === "outdoor" && !isOutdoorPlant(plant)) { plant.outdoor = true; changes.push("lives outdoors now"); }
+  if (res.set_outdoor === "indoor" && isOutdoorPlant(plant)) { plant.outdoor = false; changes.push("lives indoors now"); }
+  if (res.set_notes && res.set_notes.trim() && res.set_notes.trim() !== (plant.notes || "")) {
+    plant.notes = res.set_notes.trim();
+    changes.push("notes updated");
+  }
+  if (res.clear_health && plant.health) {
+    delete plant.health;
+    changes.push("health assessment cleared");
+  }
+  if (changes.length) await saveRecord("plants", plant);
+
+  for (const a of res.add_tasks || []) {
+    if (!a.title || !a.title.trim()) continue;
+    await saveRecord("tasks", {
+      id: uid(), title: a.title.trim(), detail: a.detail || "", done: false,
+      by: "Sprout AI", kind: a.kind || "", plantId: plant.id, plantName: plant.name,
+      ...actionSchedule(a), createdAt: new Date().toISOString(),
+    });
+    changes.push(`added: ${a.title.trim()}`);
+  }
+  for (const tid of res.complete_task_ids || []) {
+    const t = await dbGet("tasks", tid);
+    if (!t || t.plantId !== plant.id || t.done) continue;
+    if (t.repeatDays > 0) t.due = addDays(todayStr(), t.repeatDays);
+    else t.done = true;
+    await saveRecord("tasks", t);
+    changes.push(`done: ${t.title}`);
+  }
+  for (const tid of res.drop_task_ids || []) {
+    const t = await dbGet("tasks", tid);
+    if (!t || t.plantId !== plant.id) continue;
+    await removeRecord("tasks", tid);
+    changes.push(`removed: ${t.title}`);
+  }
+
+  if (changes.length) {
+    await saveRecord("logs", {
+      id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(),
+      by: "Sprout AI", note: `Updated from chat — ${changes.join("; ")}`,
+    });
+  }
+  return changes;
+}
+
 async function applyStepToPlan(plant, action) {
   const changes = [];
   if (action.water_every_days > 0 && action.water_every_days !== plant.waterEvery) {
@@ -2261,6 +2389,174 @@ async function applyStepToPlan(plant, action) {
     note: `Care plan updated from a health check — ${changes.join("; ")}`,
   });
   return changes.join("; ");
+}
+
+/* Logging care, in one place. Four separate buttons said less than they
+   cost: this sheet asks the two questions that matter — what happened, and
+   when. Several activities can be picked at once (watering and feeding
+   usually happen together), and the date can be any past day, because care
+   gets logged when you sit down, not when you do it. A backdated watering
+   never moves the schedule backwards; logAction guards that. */
+function openLogSheet(plantId, plantName) {
+  document.getElementById("logSheet")?.remove();
+  const KINDS = [
+    { k: "water", icon: "💧", label: "Watered" },
+    { k: "fertilize", icon: "🌾", label: "Fertilized" },
+    { k: "prune", icon: "✂️", label: "Pruned" },
+    { k: "repot", icon: "🪴", label: "Repotted" },
+    { k: "note", icon: "📝", label: "Note" },
+  ];
+  const el = document.createElement("div");
+  el.id = "logSheet";
+  el.className = "chat-back";
+  el.innerHTML = `
+    <div class="log-sheet" role="dialog" aria-label="Log activity for ${esc(plantName)}">
+      <div class="chat-head">
+        <div class="chat-title"><b>Log activity</b><span>${esc(plantName)} — what happened, and when?</span></div>
+        <button class="chat-close" id="logClose" aria-label="Close">✕</button>
+      </div>
+      <div class="log-body">
+        <div class="log-kinds">
+          ${KINDS.map(x => `<button type="button" class="log-kind" data-kind="${x.k}">${x.icon} ${x.label}</button>`).join("")}
+        </div>
+        <div class="log-when">
+          <button type="button" class="log-day active" data-ago="0">Today</button>
+          <button type="button" class="log-day" data-ago="1">Yesterday</button>
+          <input type="date" id="logDate" max="${todayStr()}" aria-label="On another day">
+        </div>
+        <input type="text" id="logNote" placeholder="Add a note… (optional)" maxlength="200">
+        <button class="btn block" id="logSave" disabled>Pick an activity</button>
+      </div>
+    </div>`;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("open"));
+
+  const close = () => el.remove();
+  el.addEventListener("click", e => { if (e.target === el) close(); });
+  el.querySelector("#logClose").addEventListener("click", close);
+
+  const save = el.querySelector("#logSave");
+  const dateInput = el.querySelector("#logDate");
+  const picked = () => [...el.querySelectorAll(".log-kind.active")].map(b => b.dataset.kind);
+  const chosenDate = () => {
+    const chip = el.querySelector(".log-day.active");
+    if (chip) return addDays(todayStr(), -Number(chip.dataset.ago));
+    return dateInput.value;
+  };
+  const refresh = () => {
+    const kinds = picked();
+    const dateOk = !!(el.querySelector(".log-day.active") || (dateInput.value && dateInput.value <= todayStr()));
+    const noteOk = !kinds.includes("note") || el.querySelector("#logNote").value.trim();
+    save.disabled = !kinds.length || !dateOk || !noteOk;
+    save.textContent = !kinds.length ? "Pick an activity"
+      : !dateOk ? "Pick a day"
+      : !noteOk ? "Write the note"
+      : `Log ${kinds.length > 1 ? kinds.length + " activities" : "it"}${chosenDate() === todayStr() ? "" : " · " + fmtDate(chosenDate())}`;
+  };
+
+  el.querySelectorAll(".log-kind").forEach(b => b.addEventListener("click", () => {
+    b.classList.toggle("active");
+    buzz(8);
+    refresh();
+  }));
+  el.querySelectorAll(".log-day").forEach(b => b.addEventListener("click", () => {
+    el.querySelectorAll(".log-day").forEach(x => x.classList.toggle("active", x === b));
+    dateInput.value = "";
+    refresh();
+  }));
+  dateInput.addEventListener("change", () => {
+    if (dateInput.value) el.querySelectorAll(".log-day").forEach(x => x.classList.remove("active"));
+    refresh();
+  });
+  el.querySelector("#logNote").addEventListener("input", refresh);
+
+  save.addEventListener("click", async () => {
+    if (save.disabled) return;
+    save.disabled = true;
+    const date = chosenDate();
+    const note = el.querySelector("#logNote").value.trim();
+    const kinds = picked();
+    for (const k of kinds) await logAction(plantId, k, note, { date, quiet: true });
+    const labels = { water: "watered", fertilize: "fertilized", prune: "pruned", repot: "repotted", note: "noted" };
+    toast(`Logged: ${kinds.map(k => labels[k]).join(", ")}${date === todayStr() ? "" : " · " + fmtDate(date)}`);
+    buzz([12, 40, 12]);
+    close();
+    render();
+  });
+}
+
+/* The chat panel. Lives outside #view so the page behind can re-render as
+   edits land — which it does after every applied change, so closing the
+   panel never reveals a stale page. Transcript is per-visit: the record
+   keeps the changes (and the history keeps a line per edit); the
+   conversation itself isn't something to sync or store. */
+function openPlantChat(plantId, plantName) {
+  document.getElementById("plantChat")?.remove();
+  const transcript = [];
+  const el = document.createElement("div");
+  el.id = "plantChat";
+  el.className = "chat-back";
+  el.innerHTML = `
+    <div class="chat" role="dialog" aria-label="Chat about ${esc(plantName)}">
+      <div class="chat-head">
+        <div class="chat-title"><b>${esc(plantName)}</b><span>Ask anything — it can fix the record too</span></div>
+        <button class="chat-close" id="chatClose" aria-label="Close">✕</button>
+      </div>
+      <div class="chat-log" id="chatLog">
+        <div class="msg ai">What's going on with ${esc(plantName)}? If something in here is wrong — species, schedule, a health check that missed — tell me and I'll fix it.</div>
+      </div>
+      <form class="chat-input" id="chatForm">
+        <input type="text" id="chatText" placeholder="e.g. This is actually a hoya…" autocomplete="off" maxlength="600">
+        <button class="btn" type="submit">Send</button>
+      </form>
+    </div>`;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("open"));
+
+  const log = el.querySelector("#chatLog");
+  const input = el.querySelector("#chatText");
+  const form = el.querySelector("#chatForm");
+  const close = () => el.remove();
+  el.addEventListener("click", e => { if (e.target === el) close(); });
+  el.querySelector("#chatClose").addEventListener("click", close);
+
+  const bubble = (cls, html) => {
+    const d = document.createElement("div");
+    d.className = "msg " + cls;
+    d.innerHTML = html;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+    return d;
+  };
+
+  form.addEventListener("submit", async e => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || form.dataset.busy) return;
+    form.dataset.busy = "1";
+    input.value = "";
+    transcript.push({ role: "user", text });
+    bubble("user", esc(text));
+    const wait = bubble("ai thinking", "Thinking…");
+    try {
+      const res = await aiPlantChat(plantId, transcript);
+      transcript.push({ role: "assistant", text: res.reply });
+      const applied = await applyChatChanges(plantId, res);
+      wait.remove();
+      bubble("ai", esc(res.reply) + (applied.length
+        ? `<div class="msg-changes">${applied.map(c => `<span class="msg-change">✓ ${esc(c)}</span>`).join("")}</div>`
+        : ""));
+      if (applied.length) { buzz(8); render(); }
+    } catch (err) {
+      wait.remove();
+      bubble("ai", `⚠️ ${esc(err.message)}`);
+      transcript.pop(); // the turn never happened; let them send it again
+    } finally {
+      delete form.dataset.busy;
+      input.focus();
+    }
+  });
+  input.focus();
 }
 
 function wireSteps(box, plant) {
@@ -2374,8 +2670,8 @@ async function viewPlant(id) {
   $view().innerHTML = `
     <div class="hero">
       ${heroURL ? `<img src="${heroURL}" alt="${esc(p.name)}">` : `<div class="no-photo">${g.emoji}</div>`}
-      <button class="hero-action" id="btnWaterHero" title="Water ${esc(p.name)}" aria-label="Water ${esc(p.name)}">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2s5.6 5.9 5.6 9.6a5.6 5.6 0 11-11.2 0C6.4 9.1 12 3.2 12 3.2z"/></svg>
+      <button class="hero-action" id="btnPhotoHero" title="Add photos of ${esc(p.name)}" aria-label="Add photos of ${esc(p.name)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 18.5a2 2 0 01-2 2H4a2 2 0 01-2-2V9a2 2 0 012-2h3.2l1.9-2.5h5.8L16.8 7H20a2 2 0 012 2z"/><circle cx="12" cy="13.5" r="3.8"/></svg>
       </button>
     </div>
     <h1>${esc(p.name)}</h1>
@@ -2389,12 +2685,7 @@ async function viewPlant(id) {
     ${isOutdoorPlant(p) && p.waterEvery && seasonFactor() !== 1 ? `
       <p class="subtitle" style="margin-top:-6px">${currentSeason() === "winter" ? "❄️" : "☀️"} ${currentSeason()} adjusts outdoor watering: every ${p.waterEvery}d → ~${Math.max(1, Math.round(p.waterEvery * seasonFactor()))}d</p>` : ""}
     <div class="action-row">
-      <button class="btn secondary" id="btnWater">Water now</button>
-      <button class="btn secondary" id="btnFert">Fertilize</button>
-    </div>
-    <div class="action-row">
-      <button class="btn small secondary" id="btnRepot">Repotted</button>
-      <button class="btn small secondary" id="btnPrune">Pruned</button>
+      <button class="btn block" id="btnLogActivity">＋ Log activity</button>
     </div>
 
     ${(p.alsoContains || []).length ? `
@@ -2425,8 +2716,11 @@ async function viewPlant(id) {
           : "Claude reads the photos, care history, and conditions to assess health and turn what it finds into steps."
         : "Add your Anthropic API key in Settings to enable AI health checks."}</p>
       ${aiConfigured()
-        ? `<button class="btn secondary" id="btnAiCheck"${assessInFlight(p.id) ? " disabled" : ""}>${
-             assessInFlight(p.id) ? "Looking at your plant…" : p.health ? "Check again" : "Check health"}</button>
+        ? `<div class="action-row" style="margin:0 0 4px">
+             <button class="btn secondary" id="btnAiCheck"${assessInFlight(p.id) ? " disabled" : ""}>${
+               assessInFlight(p.id) ? "Looking at your plant…" : p.health ? "Check again" : "Check health"}</button>
+             <button class="btn secondary" id="btnPlantChat">💬 Ask about it</button>
+           </div>
            <div id="aiResult">${p.health ? renderAssessment(p.health, { plantId: p.id, addedIds }) : ""}</div>`
         : `<a class="btn small secondary" href="#/settings">Set up in Settings</a>`}
     </div>
@@ -2434,10 +2728,27 @@ async function viewPlant(id) {
     ${p.notes ? `<div class="card flat"><b>Notes</b><br>${esc(p.notes).replace(/\n/g, "<br>")}</div>` : ""}
 
     <div class="section-head"><h2>Photo journal</h2>
-      <label class="btn small secondary" style="cursor:pointer">Add photo<input type="file" id="photoInput" accept="image/*" multiple hidden></label>
+      <label class="btn small secondary" style="cursor:pointer">Add photos<input type="file" id="photoInput" accept="image/*" multiple hidden></label>
     </div>
-    ${photos.length ? `<div class="gallery" id="gallery">
-      ${photos.map(ph => `<img src="${viewURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}
+    ${photos.length ? `<div id="gallery">
+      ${(() => {
+        /* One entry per visit: photos picked together share a batch id and
+           read as a single dated entry. Photos from before batches existed
+           each stand alone. */
+        const entries = [];
+        const byBatch = new Map();
+        for (const ph of photos) {
+          const key = ph.batch || ph.id;
+          if (!byBatch.has(key)) { const en = { at: ph.createdAt, shots: [] }; byBatch.set(key, en); entries.push(en); }
+          byBatch.get(key).shots.push(ph);
+        }
+        return entries.map(en => `
+          <div class="journal-entry">
+            <div class="journal-date">${fmtDateTime(en.at)}${en.shots.length > 1 ? ` · ${en.shots.length} photos` : ""}</div>
+            <div class="gallery">${en.shots.map(ph =>
+              `<img src="${viewURL(ph.blob)}" data-photo="${ph.id}" alt="" title="${fmtDateTime(ph.createdAt)}">`).join("")}</div>
+          </div>`).join("");
+      })()}
     </div>` : `<p class="subtitle">No photos yet — take a growth pic!</p>`}
 
     <h2>History</h2>
@@ -2474,12 +2785,14 @@ async function viewPlant(id) {
     });
   }
 
-  const act = async (type) => { await logAction(id, type); render(); };
-  document.getElementById("btnWater").addEventListener("click", () => act("water"));
-  document.getElementById("btnWaterHero").addEventListener("click", () => act("water"));
-  document.getElementById("btnFert").addEventListener("click", () => act("fertilize"));
-  document.getElementById("btnRepot").addEventListener("click", () => act("repot"));
-  document.getElementById("btnPrune").addEventListener("click", () => act("prune"));
+  const btnChat = document.getElementById("btnPlantChat");
+  if (btnChat) btnChat.addEventListener("click", () => openPlantChat(id, p.name));
+
+  document.getElementById("btnLogActivity").addEventListener("click", () => openLogSheet(id, p.name));
+  // The hero button opens the journal's picker — same input, so photos taken
+  // here batch into one entry exactly like the button below.
+  document.getElementById("btnPhotoHero").addEventListener("click", () =>
+    document.getElementById("photoInput").click());
   document.getElementById("btnDelete").addEventListener("click", async () => {
     if (!confirm(`Remove ${p.name} and all its photos/history? This can't be undone.`)) return;
     for (const ph of photos) await removeRecord("photos", ph.id);
@@ -2492,14 +2805,15 @@ async function viewPlant(id) {
   document.getElementById("photoInput").addEventListener("change", async e => {
     const files = [...e.target.files];
     if (!files.length) return;
-    // Save them all, then run one check — an assessment reads the newest few
-    // photos, so a call per file would ask the same question repeatedly.
+    // Save them all under one batch, then run one check — the pick is one
+    // visit to the plant, so it becomes one journal entry and one question.
+    const batch = files.length > 1 ? uid() : null;
     let saved = 0;
     for (const file of files) {
-      try { await addPhoto(id, file, { assess: false }); saved++; } catch { /* skip unreadable */ }
+      try { await addPhoto(id, file, { assess: false, batch }); saved++; } catch { /* skip unreadable */ }
     }
     if (!saved) { toast("Couldn't read that image"); return; }
-    const label = saved > 1 ? `${saved} photos saved` : "Photo saved";
+    const label = saved > 1 ? `Journal entry added — ${saved} photos` : "Photo saved";
     toast(aiConfigured() ? `${label} — checking health…` : label);
     if (saved < files.length) toast(`Skipped ${files.length - saved} unreadable photo(s)`);
     autoAssess(id);
@@ -3193,10 +3507,12 @@ async function viewSettings() {
     btn.disabled = true;
     const moved = await applyWaterRhythm();
     btn.disabled = false;
+    const dayList = waterDays().map(d => DAY_NAMES[d]).join(", ");
     out.textContent = moved.length
-      ? `Moved ${moved.length} plant${moved.length === 1 ? "" : "s"} up to every ${moved[0].to} days: `
-        + moved.map(m => `${m.name} (was ${m.from}d)`).join(", ")
-      : "Every plant already fits — nothing needed changing.";
+      ? `Moved ${moved.length} plant${moved.length === 1 ? "" : "s"} onto the rhythm: `
+        + moved.map(m => `${m.name} (${m.from}d → ${m.to}d)`).join(", ")
+        + `. The Today calendar now groups watering on ${dayList}.`
+      : `Every plant already fits — watering now lands on ${dayList}.`;
     if (moved.length) toast(`${moved.length} plant${moved.length === 1 ? "" : "s"} moved onto the rhythm`);
   });
   document.querySelectorAll("#waterDayPills .pill").forEach(pill => {
@@ -3374,10 +3690,27 @@ let todayLater = [];
 
 let renderedHash = null;
 
+/* The tabs remember where you left them. Going into a plant from halfway
+   down the collection and coming back used to land at the top — scroll back
+   down, find your spot, every single time. Each tab screen now saves its
+   offset on the way out and restores it on the way back, the way native
+   tabs behave.
+
+   Detail screens deliberately don't: a plant page, the add flow, an edit
+   form all read from the top, and swiping plant-to-plant starts each one
+   fresh. If the list shrank while you were away the browser clamps the
+   restore to what's there. Session-only — a fresh open starts at the top. */
+const SCROLL_MEMORY = new Map();
+const remembersScroll = h => /^#\/(today|plants|guide|settings)$/.test(h);
+
 async function render() {
   const hash = location.hash || "#/today";
   const sameScreen = hash === renderedHash;
-  const keepAt = sameScreen ? window.scrollY : 0;
+  if (!sameScreen && renderedHash && remembersScroll(renderedHash)) {
+    SCROLL_MEMORY.set(renderedHash, window.scrollY);
+  }
+  const keepAt = sameScreen ? window.scrollY
+    : remembersScroll(hash) ? (SCROLL_MEMORY.get(hash) || 0) : 0;
   renderedHash = hash;
   const route = routes.find(r => r.re.test(hash)) || routes[0];
   const m = hash.match(route.re);
@@ -3434,6 +3767,26 @@ async function render() {
   await render();
   checkAndNotify();
   setInterval(checkAndNotify, 60 * 60 * 1000); // hourly re-check while open
+
+  /* Heal text the model wrote before responses were cleaned: summaries with
+     a literal "—" where an em-dash should be, tofu boxes from broken
+     surrogates. Idempotent and quiet — only records that actually change are
+     rewritten (and so re-synced), so after the first pass this scans and
+     touches nothing. Runs after first paint; a heal repaints. */
+  (async () => {
+    let fixed = 0;
+    for (const store of ["plants", "tasks", "logs", "species"]) {
+      for (const rec of await dbAll(store)) {
+        const before = JSON.stringify(rec);
+        deepCleanText(rec);
+        if (JSON.stringify(rec) !== before) { await saveRecord(store, rec); fixed++; }
+      }
+    }
+    if (fixed) {
+      console.log(`Sprout: cleaned model text on ${fixed} record(s)`);
+      render();
+    }
+  })().catch(() => { /* cosmetic sweep — never worth failing the boot over */ });
 
   if (syncConfigured()) syncConnect().catch(() => {});
   maybeAutoSyncCalendar();

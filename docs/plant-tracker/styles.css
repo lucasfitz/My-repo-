@@ -316,6 +316,10 @@ body.swipe-nav .view { touch-action: pan-y pinch-zoom; }
 
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
 .gallery img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: var(--r-media); cursor: pointer; }
+/* The journal reads as visits, not as a heap of thumbnails: each batch of
+   photos taken together is one dated entry. */
+.journal-entry { margin-bottom: 16px; }
+.journal-date { font-size: 12.5px; color: var(--ink-2); letter-spacing: 0; margin-bottom: 6px; }
 
 .history-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--hairline); font-size: 15px; }
 .history-item:last-child { border-bottom: none; }
@@ -1023,3 +1027,87 @@ body.sheet-open { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition-property: opacity !important; }
 }
+
+/* ---------- Plant chat: talk to the intelligence, and it can edit ---------- */
+.chat-back {
+  position: fixed; inset: 0; z-index: 70;
+  background: rgba(20, 26, 22, 0);
+  transition: background .25s var(--ease);
+  display: flex; justify-content: center; align-items: flex-end;
+}
+.chat-back.open { background: rgba(20, 26, 22, .45); }
+.chat {
+  width: 100%; max-width: 640px; height: 86%;
+  background: var(--ground); border-radius: 22px 22px 0 0;
+  display: flex; flex-direction: column;
+  transform: translateY(100%);
+  transition: transform .3s cubic-bezier(.2,.9,.3,1.02);
+}
+.chat-back.open .chat { transform: none; }
+.chat-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 16px 18px 12px; border-bottom: 1px solid var(--hairline); flex: none;
+}
+.chat-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.chat-title b { font-size: 17px; font-weight: 700; letter-spacing: -0.025em; }
+.chat-title span { font-size: 12.5px; color: var(--ink-2); }
+.chat-close {
+  flex: none; width: 32px; height: 32px; border-radius: var(--r-pill); border: none;
+  background: var(--surface-sunk); color: var(--ink-2); font-size: 13px;
+  cursor: pointer; display: grid; place-items: center;
+}
+.chat-log {
+  flex: 1; overflow-y: auto; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.msg {
+  max-width: 86%; padding: 10px 14px; border-radius: 18px;
+  font-size: 14.5px; line-height: 1.45; letter-spacing: -0.01em;
+  overflow-wrap: break-word;
+}
+.msg.user { align-self: flex-end; background: var(--ink); color: var(--ground); border-bottom-right-radius: 6px; }
+.msg.ai { align-self: flex-start; background: var(--surface); box-shadow: var(--lift-1); border-bottom-left-radius: 6px; }
+.msg.thinking { color: var(--ink-3); font-style: italic; }
+.msg-changes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.msg-change {
+  font-size: 12px; font-weight: 620; background: var(--grow-bg); color: var(--grow);
+  padding: 3px 10px; border-radius: var(--r-pill);
+}
+.chat-input {
+  display: flex; gap: 8px; flex: none;
+  padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--hairline);
+}
+.chat-input input { flex: 1; min-width: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .chat-back, .chat { transition: none; }
+}
+
+/* ---------- Log activity: what happened, and when ---------- */
+.log-sheet {
+  width: 100%; max-width: 640px;
+  background: var(--ground); border-radius: 22px 22px 0 0;
+  padding-bottom: calc(14px + env(safe-area-inset-bottom));
+  transform: translateY(100%);
+  transition: transform .3s cubic-bezier(.2,.9,.3,1.02);
+}
+.chat-back.open .log-sheet { transform: none; }
+.log-body { padding: 16px 18px 0; display: grid; gap: 14px; }
+.log-kinds { display: flex; flex-wrap: wrap; gap: 8px; }
+.log-kind {
+  border: 1.5px solid var(--hairline); background: var(--surface); color: var(--ink);
+  border-radius: var(--r-pill); padding: 10px 16px; min-height: 44px;
+  font: inherit; font-size: 14.5px; font-weight: 620; letter-spacing: -0.01em;
+  cursor: pointer; transition: background .15s var(--ease), border-color .15s var(--ease), transform .1s var(--ease);
+}
+.log-kind:active { transform: scale(.95); }
+.log-kind.active { background: var(--ink); border-color: var(--ink); color: var(--ground); }
+.log-when { display: flex; gap: 8px; align-items: stretch; }
+.log-day {
+  flex: none; border: 1.5px solid var(--hairline); background: var(--surface); color: var(--ink);
+  border-radius: var(--r-field); padding: 10px 16px; min-height: 44px;
+  font: inherit; font-size: 14px; font-weight: 620; cursor: pointer;
+  transition: background .15s var(--ease), border-color .15s var(--ease);
+}
+.log-day.active { background: var(--ink); border-color: var(--ink); color: var(--ground); }
+#logDate { flex: 1; min-width: 0; }
