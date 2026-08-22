@@ -3541,6 +3541,26 @@ async function render() {
   checkAndNotify();
   setInterval(checkAndNotify, 60 * 60 * 1000); // hourly re-check while open
 
+  /* Heal text the model wrote before responses were cleaned: summaries with
+     a literal "—" where an em-dash should be, tofu boxes from broken
+     surrogates. Idempotent and quiet — only records that actually change are
+     rewritten (and so re-synced), so after the first pass this scans and
+     touches nothing. Runs after first paint; a heal repaints. */
+  (async () => {
+    let fixed = 0;
+    for (const store of ["plants", "tasks", "logs", "species"]) {
+      for (const rec of await dbAll(store)) {
+        const before = JSON.stringify(rec);
+        deepCleanText(rec);
+        if (JSON.stringify(rec) !== before) { await saveRecord(store, rec); fixed++; }
+      }
+    }
+    if (fixed) {
+      console.log(`Sprout: cleaned model text on ${fixed} record(s)`);
+      render();
+    }
+  })().catch(() => { /* cosmetic sweep — never worth failing the boot over */ });
+
   if (syncConfigured()) syncConnect().catch(() => {});
   maybeAutoSyncCalendar();
 
