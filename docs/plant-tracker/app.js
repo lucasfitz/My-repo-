@@ -405,16 +405,22 @@ function computeCareTasks(plants) {
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
-async function logAction(plantId, type, note = "") {
+/* `date` lets care be logged on the day it actually happened, not the day it
+   got written down — "I watered everything Tuesday" on Thursday. A backdated
+   watering never moves lastWatered backwards: the newest real watering is
+   what the schedule runs on. */
+async function logAction(plantId, type, note = "", { date = todayStr(), quiet = false } = {}) {
   const plant = await dbGet("plants", plantId);
   if (!plant) return;
-  const now = new Date().toISOString();
-  if (type === "water") plant.lastWatered = todayStr();
-  if (type === "fertilize") plant.lastFertilized = todayStr();
+  const at = date === todayStr()
+    ? new Date().toISOString()
+    : new Date(date + "T12:00:00").toISOString();
+  if (type === "water" && (!plant.lastWatered || date > plant.lastWatered)) plant.lastWatered = date;
+  if (type === "fertilize" && (!plant.lastFertilized || date > plant.lastFertilized)) plant.lastFertilized = date;
   await saveRecord("plants", plant);
-  await saveRecord("logs", { id: uid(), plantId, type, at: now, by: state.settings.activeUser, note });
+  await saveRecord("logs", { id: uid(), plantId, type, at, by: state.settings.activeUser, note });
   const verbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned", note: "Noted" };
-  toast(`${verbs[type] || type} ${plant.name}`);
+  if (!quiet) toast(`${verbs[type] || type} ${plant.name}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -2278,6 +2284,100 @@ async function applyStepToPlan(plant, action) {
   return changes.join("; ");
 }
 
+/* Logging care, in one place. Four separate buttons said less than they
+   cost: this sheet asks the two questions that matter — what happened, and
+   when. Several activities can be picked at once (watering and feeding
+   usually happen together), and the date can be any past day, because care
+   gets logged when you sit down, not when you do it. A backdated watering
+   never moves the schedule backwards; logAction guards that. */
+function openLogSheet(plantId, plantName) {
+  document.getElementById("logSheet")?.remove();
+  const KINDS = [
+    { k: "water", icon: "💧", label: "Watered" },
+    { k: "fertilize", icon: "🌾", label: "Fertilized" },
+    { k: "prune", icon: "✂️", label: "Pruned" },
+    { k: "repot", icon: "🪴", label: "Repotted" },
+    { k: "note", icon: "📝", label: "Note" },
+  ];
+  const el = document.createElement("div");
+  el.id = "logSheet";
+  el.className = "chat-back";
+  el.innerHTML = `
+    <div class="log-sheet" role="dialog" aria-label="Log activity for ${esc(plantName)}">
+      <div class="chat-head">
+        <div class="chat-title"><b>Log activity</b><span>${esc(plantName)} — what happened, and when?</span></div>
+        <button class="chat-close" id="logClose" aria-label="Close">✕</button>
+      </div>
+      <div class="log-body">
+        <div class="log-kinds">
+          ${KINDS.map(x => `<button type="button" class="log-kind" data-kind="${x.k}">${x.icon} ${x.label}</button>`).join("")}
+        </div>
+        <div class="log-when">
+          <button type="button" class="log-day active" data-ago="0">Today</button>
+          <button type="button" class="log-day" data-ago="1">Yesterday</button>
+          <input type="date" id="logDate" max="${todayStr()}" aria-label="On another day">
+        </div>
+        <input type="text" id="logNote" placeholder="Add a note… (optional)" maxlength="200">
+        <button class="btn block" id="logSave" disabled>Pick an activity</button>
+      </div>
+    </div>`;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("open"));
+
+  const close = () => el.remove();
+  el.addEventListener("click", e => { if (e.target === el) close(); });
+  el.querySelector("#logClose").addEventListener("click", close);
+
+  const save = el.querySelector("#logSave");
+  const dateInput = el.querySelector("#logDate");
+  const picked = () => [...el.querySelectorAll(".log-kind.active")].map(b => b.dataset.kind);
+  const chosenDate = () => {
+    const chip = el.querySelector(".log-day.active");
+    if (chip) return addDays(todayStr(), -Number(chip.dataset.ago));
+    return dateInput.value;
+  };
+  const refresh = () => {
+    const kinds = picked();
+    const dateOk = !!(el.querySelector(".log-day.active") || (dateInput.value && dateInput.value <= todayStr()));
+    const noteOk = !kinds.includes("note") || el.querySelector("#logNote").value.trim();
+    save.disabled = !kinds.length || !dateOk || !noteOk;
+    save.textContent = !kinds.length ? "Pick an activity"
+      : !dateOk ? "Pick a day"
+      : !noteOk ? "Write the note"
+      : `Log ${kinds.length > 1 ? kinds.length + " activities" : "it"}${chosenDate() === todayStr() ? "" : " · " + fmtDate(chosenDate())}`;
+  };
+
+  el.querySelectorAll(".log-kind").forEach(b => b.addEventListener("click", () => {
+    b.classList.toggle("active");
+    buzz(8);
+    refresh();
+  }));
+  el.querySelectorAll(".log-day").forEach(b => b.addEventListener("click", () => {
+    el.querySelectorAll(".log-day").forEach(x => x.classList.toggle("active", x === b));
+    dateInput.value = "";
+    refresh();
+  }));
+  dateInput.addEventListener("change", () => {
+    if (dateInput.value) el.querySelectorAll(".log-day").forEach(x => x.classList.remove("active"));
+    refresh();
+  });
+  el.querySelector("#logNote").addEventListener("input", refresh);
+
+  save.addEventListener("click", async () => {
+    if (save.disabled) return;
+    save.disabled = true;
+    const date = chosenDate();
+    const note = el.querySelector("#logNote").value.trim();
+    const kinds = picked();
+    for (const k of kinds) await logAction(plantId, k, note, { date, quiet: true });
+    const labels = { water: "watered", fertilize: "fertilized", prune: "pruned", repot: "repotted", note: "noted" };
+    toast(`Logged: ${kinds.map(k => labels[k]).join(", ")}${date === todayStr() ? "" : " · " + fmtDate(date)}`);
+    buzz([12, 40, 12]);
+    close();
+    render();
+  });
+}
+
 /* The chat panel. Lives outside #view so the page behind can re-render as
    edits land — which it does after every applied change, so closing the
    panel never reveals a stale page. Transcript is per-visit: the record
@@ -2478,12 +2578,7 @@ async function viewPlant(id) {
     ${isOutdoorPlant(p) && p.waterEvery && seasonFactor() !== 1 ? `
       <p class="subtitle" style="margin-top:-6px">${currentSeason() === "winter" ? "❄️" : "☀️"} ${currentSeason()} adjusts outdoor watering: every ${p.waterEvery}d → ~${Math.max(1, Math.round(p.waterEvery * seasonFactor()))}d</p>` : ""}
     <div class="action-row">
-      <button class="btn secondary" id="btnWater">Water now</button>
-      <button class="btn secondary" id="btnFert">Fertilize</button>
-    </div>
-    <div class="action-row">
-      <button class="btn small secondary" id="btnRepot">Repotted</button>
-      <button class="btn small secondary" id="btnPrune">Pruned</button>
+      <button class="btn block" id="btnLogActivity">＋ Log activity</button>
     </div>
 
     ${(p.alsoContains || []).length ? `
@@ -2586,15 +2681,11 @@ async function viewPlant(id) {
   const btnChat = document.getElementById("btnPlantChat");
   if (btnChat) btnChat.addEventListener("click", () => openPlantChat(id, p.name));
 
-  const act = async (type) => { await logAction(id, type); render(); };
-  document.getElementById("btnWater").addEventListener("click", () => act("water"));
+  document.getElementById("btnLogActivity").addEventListener("click", () => openLogSheet(id, p.name));
   // The hero button opens the journal's picker — same input, so photos taken
   // here batch into one entry exactly like the button below.
   document.getElementById("btnPhotoHero").addEventListener("click", () =>
     document.getElementById("photoInput").click());
-  document.getElementById("btnFert").addEventListener("click", () => act("fertilize"));
-  document.getElementById("btnRepot").addEventListener("click", () => act("repot"));
-  document.getElementById("btnPrune").addEventListener("click", () => act("prune"));
   document.getElementById("btnDelete").addEventListener("click", async () => {
     if (!confirm(`Remove ${p.name} and all its photos/history? This can't be undone.`)) return;
     for (const ph of photos) await removeRecord("photos", ph.id);
