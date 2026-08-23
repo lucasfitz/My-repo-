@@ -1111,3 +1111,25 @@ body.sheet-open { overflow: hidden; }
 }
 .log-day.active { background: var(--ink); border-color: var(--ink); color: var(--ground); }
 #logDate { flex: 1; min-width: 0; }
+
+/* ---------- The fertilizer shelf (Guide tab) ---------- */
+.fert-item { padding: 16px 18px; }
+.fert-head { display: flex; align-items: flex-start; gap: 10px; }
+.fert-title { flex: 1; min-width: 0; }
+.fert-title b { font-size: 16px; letter-spacing: -0.02em; }
+.fert-brand { color: var(--ink-2); font-size: 14px; }
+.fert-meta { font-size: 12.5px; color: var(--ink-2); margin-top: 1px; letter-spacing: 0; }
+.fert-del {
+  flex: none; width: 30px; height: 30px; border-radius: var(--r-pill); border: none;
+  background: var(--surface-sunk); color: var(--ink-3); font-size: 12px;
+  cursor: pointer; display: grid; place-items: center;
+}
+.fert-line { font-size: 13.5px; margin: 8px 0 0; letter-spacing: -0.005em; line-height: 1.45; }
+.fert-line.sub { color: var(--ink-2); }
+.fert-line.caution { color: var(--warn); }
+.fert-feeds { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin: 10px 0; }
+.fert-assign {
+  border: 1.5px dashed var(--hairline); border-radius: var(--r-pill);
+  background: transparent; color: var(--ink-2); font: inherit; font-size: 13px;
+  padding: 6px 10px; min-height: 36px; max-width: 140px;
+}
