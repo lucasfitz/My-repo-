@@ -5,7 +5,7 @@
 // IndexedDB wrapper
 // ---------------------------------------------------------------------------
 const DB_NAME = "sprout-db";
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 let _db = null;
 
 function openDB() {
@@ -30,6 +30,8 @@ function openDB() {
       if (!db.objectStoreNames.contains("species")) db.createObjectStore("species", { keyPath: "key" });
       // Household preferences — one record, synced. See loadPrefs().
       if (!db.objectStoreNames.contains("prefs")) db.createObjectStore("prefs", { keyPath: "id" });
+      // The fertilizer shelf: what's owned, what's needed, synced. (v5)
+      if (!db.objectStoreNames.contains("ferts")) db.createObjectStore("ferts", { keyPath: "id" });
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
@@ -1118,12 +1120,15 @@ async function viewToday() {
     document.getElementById("cardSheet")?.remove();
     const g = card.plant ? guideEntry(card.plant.speciesKey) : null;
     const photo = card.plant ? await latestPhotoURL(card.plant.id) : null;
+    // Which bottle to reach for, right where the job is.
+    const fert = card.plant && card.plant.fertId ? await dbGet("ferts", card.plant.fertId) : null;
     const rowsHtml = card.rows.map((r, i) => {
       if (r.kind === "care") {
         const verb = r.t.kind === "water" ? "Water" : "Fertilize";
+        const fertTag = r.t.kind === "fertilize" && fert ? ` · ${esc(fert.name)}` : "";
         return `<button class="deck-act" data-row="${i}" data-kind="${r.t.kind}">
           <span class="deck-act-icon">${r.t.kind === "water" ? "💧" : "🌾"}</span>
-          <span class="deck-act-main"><b>${verb}</b><span class="deck-act-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}${r.wxTag || ""}</span></span>
+          <span class="deck-act-main"><b>${verb}</b><span class="deck-act-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}${fertTag}${r.wxTag || ""}</span></span>
           <span class="deck-tick">✓</span>
         </button>`;
       }
@@ -2689,6 +2694,12 @@ async function viewPlant(id) {
     </div>
     ${isOutdoorPlant(p) && p.waterEvery && seasonFactor() !== 1 ? `
       <p class="subtitle" style="margin-top:-6px">${currentSeason() === "winter" ? "❄️" : "☀️"} ${currentSeason()} adjusts outdoor watering: every ${p.waterEvery}d → ~${Math.max(1, Math.round(p.waterEvery * seasonFactor()))}d</p>` : ""}
+    ${await (async () => {
+      const f = p.fertId ? await dbGet("ferts", p.fertId) : null;
+      return f ? `<p class="subtitle" style="margin-top:-6px">🌾 Fed with <b>${esc(f.name)}</b>${
+        f.owned === false ? ` <span style="color:var(--warn)">(on the shopping list)</span>` : ""}${
+        f.dilution ? ` — ${esc(f.dilution)}` : ""}</p>` : "";
+    })()}
     <div class="action-row">
       <button class="btn block" id="btnLogActivity">＋ Log activity</button>
     </div>
@@ -2887,6 +2898,41 @@ function scheduleNote(plants, guide, field, guideDays) {
 async function viewGuide() {
   const season = currentSeason();
   const owned = await ownedSpecies();
+  const allPlants = (await dbAll("plants")).filter(p => !p.archived);
+  const ferts = (await dbAll("ferts")).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const ownedFerts = ferts.filter(f => f.owned !== false);
+  const neededFerts = ferts.filter(f => f.owned === false);
+
+  /* The fertilizer shelf. Each card is a product — what it is, how it's
+     used, and which plants it feeds (tap a plant to unassign, pick from the
+     dropdown to assign). "Ran out" moves it to the shopping list without
+     losing anything; "Bought it" brings it back. */
+  const fertCard = f => {
+    const feeds = allPlants.filter(p => p.fertId === f.id);
+    const rest = allPlants.filter(p => p.fertId !== f.id);
+    const meta = [f.npk ? "NPK " + f.npk : "", f.form || ""].filter(Boolean).join(" · ");
+    return `
+    <div class="card fert-item" data-fert="${f.id}">
+      <div class="fert-head">
+        <div class="fert-title">
+          <b>${esc(f.name)}</b>${f.brand ? `<span class="fert-brand"> · ${esc(f.brand)}</span>` : ""}
+          ${meta ? `<div class="fert-meta">${esc(meta)}</div>` : ""}
+        </div>
+        <button class="fert-del" data-del aria-label="Remove ${esc(f.name)}">✕</button>
+      </div>
+      ${f.dilution ? `<p class="fert-line">${esc(f.dilution)}</p>` : ""}
+      ${f.summary ? `<p class="fert-line sub">${esc(f.summary)}</p>` : ""}
+      ${f.caution ? `<p class="fert-line caution">⚠️ ${esc(f.caution)}</p>` : ""}
+      <div class="fert-feeds">
+        ${feeds.map(p => `<button class="job chore" data-unassign="${p.id}" title="Stop feeding ${esc(p.name)} with this">${esc(p.name)} ✕</button>`).join("")}
+        ${rest.length ? `<select class="fert-assign" data-assign aria-label="Feed another plant with this">
+          <option value="">+ feeds…</option>
+          ${rest.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}
+        </select>` : ""}
+      </div>
+      <button class="btn small secondary" data-toggle>${f.owned === false ? "Bought it ✓" : "Ran out — put on the list"}</button>
+    </div>`;
+  };
   // "Other" is a placeholder for a species we have no care data on — real
   // advice for it doesn't exist, so it stays out of the personalised list.
   const mine = [...owned.values()]
@@ -2931,6 +2977,27 @@ async function viewGuide() {
       <div id="gardenAiResult"></div>
     </div>` : ""}
 
+    <div class="section-head"><h2>Fertilizers</h2></div>
+    <div class="card flat">
+      <form id="fertForm" class="inline-form">
+        <input type="text" id="fertText" placeholder="Paste a product link or type its name…" maxlength="300">
+        <button class="btn" type="submit">Add</button>
+      </form>
+      <div style="margin-top:8px;display:flex;align-items:center;gap:10px">
+        <label class="btn small secondary" style="cursor:pointer">📷 Snap the label<input type="file" id="fertPhoto" accept="image/*" capture="environment" hidden></label>
+        <span class="hint" id="fertStatus">${aiConfigured()
+          ? "It identifies the product and matches it to your plants."
+          : "Without an API key, what you type is saved as-is."}</span>
+      </div>
+    </div>
+    <div id="fertList">
+      ${ownedFerts.length ? `<div class="section-head" style="margin-top:14px"><h2 style="margin:0;font-size:16px">On the shelf · ${ownedFerts.length}</h2></div>
+        ${ownedFerts.map(fertCard).join("")}` : ""}
+      ${neededFerts.length ? `<div class="section-head" style="margin-top:14px"><h2 style="margin:0;font-size:16px">To buy · ${neededFerts.length}</h2></div>
+        ${neededFerts.map(fertCard).join("")}` : ""}
+      ${!ferts.length ? `<p class="subtitle" style="margin:4px 0 0">Nothing on the shelf yet — add what you've got and each plant learns what it's fed with.</p>` : ""}
+    </div>
+
     ${mine.length ? `
       <div class="section-head"><h2>Your plants</h2></div>
       ${mine.map(o => card(o.g, o.plants)).join("")}
@@ -2944,6 +3011,82 @@ async function viewGuide() {
     <div class="search-bar"><input type="text" id="guideSearch" placeholder="Search ${allSpecies().length - 1} species…"></div>
     <div id="guideAll" hidden></div>
     <button class="btn block secondary" id="guideBrowse">Browse all ${allSpecies().length - 1} species</button>`;
+
+  /* Submitting a fertilizer: link, name, or label photo. With a key the
+     product identifies itself and lands pre-assigned to the plants it suits;
+     without one the text is kept verbatim — a shelf you can still curate by
+     hand. Every write goes through saveRecord, so the shelf syncs. */
+  const fertStatus = document.getElementById("fertStatus");
+  const addFert = async ({ text = "", imageBlob = null }) => {
+    fertStatus.textContent = "Identifying…";
+    try {
+      let rec;
+      let suits = [];
+      if (aiConfigured()) {
+        const r = await aiIdentifyFert({ text, imageBlob });
+        rec = { id: uid(), name: r.name, brand: r.brand, npk: r.npk, form: r.form,
+          dilution: r.dilution, summary: r.summary, caution: r.caution,
+          owned: true, createdAt: new Date().toISOString() };
+        suits = r.suits_plant_ids || [];
+      } else {
+        if (!text.trim()) throw new Error("Type a name, or add your API key for photos.");
+        rec = { id: uid(), name: text.trim(), brand: "", npk: "", form: "", dilution: "",
+          summary: "", caution: "", owned: true, createdAt: new Date().toISOString() };
+      }
+      await saveRecord("ferts", rec);
+      let assigned = 0;
+      for (const pid of suits) {
+        const p = await dbGet("plants", pid);
+        if (p && !p.archived) { p.fertId = rec.id; await saveRecord("plants", p); assigned++; }
+      }
+      toast(`Added ${rec.name}${assigned ? ` — feeds ${assigned} plant${assigned === 1 ? "" : "s"}` : ""}`);
+      buzz(8);
+      render();
+    } catch (err) {
+      fertStatus.textContent = `⚠️ ${err.message}`;
+    }
+  };
+  document.getElementById("fertForm").addEventListener("submit", e => {
+    e.preventDefault();
+    const text = document.getElementById("fertText").value.trim();
+    if (text) addFert({ text });
+  });
+  document.getElementById("fertPhoto").addEventListener("change", e => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (!aiConfigured()) { fertStatus.textContent = "⚠️ Reading a label needs the API key — set it in Settings."; return; }
+    addFert({ imageBlob: f });
+  });
+
+  document.getElementById("fertList").addEventListener("click", async e => {
+    const card = e.target.closest("[data-fert]");
+    if (!card) return;
+    const f = await dbGet("ferts", card.dataset.fert);
+    if (!f) return;
+    if (e.target.closest("[data-del]")) {
+      if (!confirm(`Remove ${f.name} from the shelf?`)) return;
+      // Its plants shouldn't point at a ghost.
+      for (const p of await dbAll("plants")) {
+        if (p.fertId === f.id) { delete p.fertId; await saveRecord("plants", p); }
+      }
+      await removeRecord("ferts", f.id);
+      render();
+    } else if (e.target.closest("[data-toggle]")) {
+      f.owned = f.owned === false;
+      await saveRecord("ferts", f);
+      toast(f.owned ? `${f.name} back on the shelf` : `${f.name} on the shopping list`);
+      render();
+    } else if (e.target.closest("[data-unassign]")) {
+      const p = await dbGet("plants", e.target.closest("[data-unassign]").dataset.unassign);
+      if (p) { delete p.fertId; await saveRecord("plants", p); render(); }
+    }
+  });
+  document.getElementById("fertList").addEventListener("change", async e => {
+    const sel = e.target.closest("[data-assign]");
+    if (!sel || !sel.value) return;
+    const p = await dbGet("plants", sel.value);
+    if (p) { p.fertId = sel.closest("[data-fert]").dataset.fert; await saveRecord("plants", p); render(); }
+  });
 
   const btnGardenAi = document.getElementById("btnGardenAi");
   if (btnGardenAi) btnGardenAi.addEventListener("click", async () => {

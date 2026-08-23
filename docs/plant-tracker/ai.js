@@ -840,3 +840,68 @@ ${describeCareHistory(logs) || "  (none recorded)"}
     maxTokens: 6000,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Fertilizer identification — from a pasted link, a typed name, or a label photo
+// ---------------------------------------------------------------------------
+/* The submission is whatever's at hand: a product URL (its slug usually names
+   the product outright), the name off the bottle, or a photo of the label.
+   The answer is the shelf card — what it is, how it's used — plus which of
+   the owner's plants it suits, so the mapping to each plant's care regime
+   happens in the same breath as the submission. */
+function fertSchema(plants) {
+  return {
+    type: "object",
+    properties: {
+      found: { type: "boolean", description: "False only if this clearly isn't a plant fertilizer or feed at all" },
+      name: { type: "string", description: "The product's name as it appears on the label, e.g. 'Grow Big'" },
+      brand: { type: "string", description: "Maker, e.g. 'FoxFarm'; \"\" if unknown" },
+      npk: { type: "string", description: "N-P-K as printed, e.g. '6-4-4'; \"\" if unknown" },
+      form: { type: "string", enum: ["liquid", "granular", "slow-release", "spikes", "organic", "foliar", "other"] },
+      dilution: {
+        type: "string",
+        description: "How it's actually used, one line: dose, frequency, growing-season notes. \"\" if unknown."
+      },
+      summary: { type: "string", description: "One line on what this feed is good for" },
+      caution: { type: "string", description: "One line if something needs care (salts, sensitive species, strength); \"\" otherwise" },
+      suits_plant_ids: {
+        type: "array",
+        items: { type: "string", enum: plants.length ? plants.map(p => p.id) : ["none"] },
+        description: "Ids of the owner's plants this feed genuinely suits — the ones you would actually use it on. " +
+          "Empty if none. Be selective: an all-purpose feed suits most foliage plants, an orchid or acid feed suits few."
+      },
+      note: { type: "string", description: "One short line to the owner: what you recognized, or what was unclear" }
+    },
+    required: ["found", "name", "brand", "npk", "form", "dilution", "summary", "caution", "suits_plant_ids", "note"],
+    additionalProperties: false
+  };
+}
+
+async function aiIdentifyFert({ text = "", imageBlob = null }) {
+  const plants = (await dbAll("plants")).filter(p => !p.archived);
+  const roster = plants.map(p =>
+    `- [id ${p.id}] "${p.name}" — ${p.species || guideEntry(p.speciesKey).name}${p.fertEvery ? `, fed every ${p.fertEvery}d` : ", feeding off"}`).join("\n");
+
+  const content = [];
+  if (imageBlob) {
+    content.push({ type: "text", text: "A photo of the fertilizer's label or packaging:" });
+    content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: await blobToApiImage(imageBlob) } });
+  }
+  content.push({
+    type: "text",
+    text: `${text ? `The owner submitted this fertilizer${/https?:\/\//.test(text) ? " as a product link (identify it from the URL's own text — you cannot open it)" : ""}:\n${text}\n\n` : ""}Identify the product and say how it fits this collection.
+
+The owner's plants:
+${roster || "(none yet)"}`,
+  });
+
+  const result = await askClaude({
+    system: "You are Sprout's fertilizer clerk: identify plant feeds from labels, product links, or names, and say plainly how they are used and which of the owner's plants they suit. If the submission is ambiguous, identify the most likely product and say so in the note rather than guessing silently.",
+    messages: [{ role: "user", content }],
+    schema: fertSchema(plants),
+    effort: imageBlob ? "medium" : "low",
+    maxTokens: imageBlob ? 8000 : 5000,
+  });
+  if (!result.found) throw new Error(result.note || "That doesn't look like a plant fertilizer.");
+  return result;
+}

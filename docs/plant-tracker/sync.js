@@ -18,7 +18,9 @@ const SYNC = {
 // "prefs" carries the household's shared choices — watering days, rooms, who
 // lives here. "settings" stays out: it holds the API key and the credentials
 // for this connection, which belong to the device and nowhere else.
-const SYNC_STORES = ["plants", "logs", "tasks", "photos", "species", "prefs"];
+// "ferts" is the household's fertilizer shelf — owned and needed alike belong
+// to both of you, same as the plants they feed.
+const SYNC_STORES = ["plants", "logs", "tasks", "photos", "species", "prefs", "ferts"];
 const PHOTO_BUCKET = "plant-photos";
 
 // Paste into Supabase > SQL Editor > Run. Safe to run more than once.
