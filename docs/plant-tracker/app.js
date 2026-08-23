@@ -684,26 +684,30 @@ async function viewToday() {
       ${wxCorner}
     </div>`;
 
-  // Porch weather: live conditions + advice for outdoor plants
+  /* Porch weather sits BELOW the deck now, with the rest of the status. The
+     cards are what this screen is for — nothing renders between the greeting
+     and the first card. Actionable warnings (frost, heat, rain) still earn
+     their space down there; anything already covered by the row tags and the
+     week view stays out entirely. */
+  let wxBlock = "";
   if (hasOutdoor) {
     if (!weatherConfigured()) {
-      html += `<div class="card flat wx-card">
+      wxBlock = `<div class="card flat wx-card">
         <b>Porch weather</b>
         <p class="subtitle" style="margin:6px 0 10px">Set your location once and your porch plants get live rain, heat, and frost advice.</p>
         <a class="btn small secondary" href="#/settings">Set location in Settings</a>
       </div>`;
     } else if (wx) {
-      // The numbers moved to the chip in the header. Only advisories earn space
-      // here, and only when there is one — "nothing dramatic in the forecast"
-      // was a card's worth of furniture to say nothing.
+      // Only advisories earn space, and only when there is one — "nothing
+      // dramatic in the forecast" was a card's worth of furniture saying nothing.
       const advisories = weatherAdvisories(wx);
       if (advisories.length) {
-        html += `<div class="card flat wx-card">
+        wxBlock = `<div class="card flat wx-card">
           ${advisories.map(a => `<div class="wx-advice">${a.icon} ${esc(a.text)}</div>`).join("")}
         </div>`;
       }
     } else {
-      html += `<div class="card flat wx-card"><b>Porch weather</b><p class="subtitle" style="margin:6px 0 0">Couldn't reach the weather service — using your normal schedule for now.</p></div>`;
+      wxBlock = `<div class="card flat wx-card"><b>Porch weather</b><p class="subtitle" style="margin:6px 0 0">Couldn't reach the weather service — using your normal schedule for now.</p></div>`;
     }
   }
 
@@ -957,6 +961,7 @@ async function viewToday() {
   };
 
   html += await cardStack();
+  html += wxBlock;
 
   /* Status, not action — so it sits under the card rather than above it.
      The point of this screen is the plant in front of you; how the collection
