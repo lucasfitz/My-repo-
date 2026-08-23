@@ -144,9 +144,9 @@ function weatherAdvisories(wx) {
   } else if (flags.rainAhead) {
     out.push({ icon: "🌦️", text: "Decent rain expected in the next couple of days — thirsty-but-not-desperate porch plants can wait for it." });
   }
-  const season = currentSeason();
-  if (season === "winter") out.push({ icon: "", text: "Winter: outdoor watering intervals are stretched ~50% and fertilizing can pause until spring." });
-  if (season === "summer") out.push({ icon: "", text: "Summer: outdoor watering intervals are tightened ~20% while growth is at its peak." });
+  // No seasonal line here: the seasonal adjustment acts on the schedule by
+  // itself, and each outdoor plant's page shows its own adjusted interval —
+  // a standing banner restating policy was furniture, not advice.
   return out;
 }
 
