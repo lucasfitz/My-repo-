@@ -152,7 +152,7 @@ function blobToApiImage(blob, maxDim = 800) {
 }
 
 function describeCareHistory(logs, limit = 15) {
-  const verbs = { water: "watered", fertilize: "fertilized", repot: "repotted", prune: "pruned", note: "note", ai: "AI health check" };
+  const verbs = { water: "watered", fertilize: "fertilized", repot: "repotted", prune: "pruned", note: "note", ai: "AI health check", check: "soil check" };
   return logs
     .sort((a, b) => b.at.localeCompare(a.at))
     .slice(0, limit)

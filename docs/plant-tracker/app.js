@@ -380,11 +380,46 @@ function nextDue(plant, kind) {
   }
   const last = kind === "water" ? plant.lastWatered : plant.lastFertilized;
   const base = last || plant.createdAt.slice(0, 10);
-  const due = addDays(base, every);
   // Fertilizing happens standing at the plant with the can — it belongs on
   // watering days too, or the calendar keeps sprouting lone mid-week chips
   // that the rhythm was supposed to have cleared away.
-  return snapToWaterDay(due, every);
+  let due = snapToWaterDay(addDays(base, every), every);
+  /* "Checked — soil still wet" holds the watering without faking one:
+     lastWatered stays honest and the due date waits out the snooze instead.
+     Forward-snapped onto the rhythm, never backward — a hold that lands the
+     plant back on today's list would be no hold at all. An expired snooze is
+     simply outrun by the natural due date. */
+  if (kind === "water" && plant.waterSnooze && plant.waterSnooze > due) {
+    due = snapForwardToWaterDay(plant.waterSnooze, every);
+  }
+  return due;
+}
+
+function snapForwardToWaterDay(dateStr, every) {
+  const days = waterDays();
+  if (!days.length || every < maxWaterGap(days)) return dateStr;
+  const d = new Date(dateStr + "T12:00:00");
+  for (let i = 0; i < 7; i++) {
+    if (days.includes(d.getDay())) break;
+    d.setDate(d.getDate() + 1);
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+/* The soil got checked and it's still wet. Log the check (it's real care,
+   and the AI reads it — a plant repeatedly still-wet on its due day is how
+   an interval learns it's too short) and hold the watering for two days. */
+async function skipWatering(plantId, date = todayStr()) {
+  const plant = await dbGet("plants", plantId);
+  if (!plant) return null;
+  plant.waterSnooze = addDays(date, 2);
+  await saveRecord("plants", plant);
+  await saveRecord("logs", {
+    id: uid(), plantId, type: "check", at: date === todayStr()
+      ? new Date().toISOString() : new Date(date + "T12:00:00").toISOString(),
+    by: state.settings.activeUser, note: "soil still wet, held off watering",
+  });
+  return nextDue(plant, "water");
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +453,7 @@ async function logAction(plantId, type, note = "", { date = todayStr(), quiet = 
     ? new Date().toISOString()
     : new Date(date + "T12:00:00").toISOString();
   if (type === "water" && (!plant.lastWatered || date > plant.lastWatered)) plant.lastWatered = date;
+  if (type === "water") delete plant.waterSnooze; // a real watering ends any hold
   if (type === "fertilize" && (!plant.lastFertilized || date > plant.lastFertilized)) plant.lastFertilized = date;
   await saveRecord("plants", plant);
   await saveRecord("logs", { id: uid(), plantId, type, at, by: state.settings.activeUser, note });
@@ -1126,11 +1162,16 @@ async function viewToday() {
       if (r.kind === "care") {
         const verb = r.t.kind === "water" ? "Water" : "Fertilize";
         const fertTag = r.t.kind === "fertilize" && fert ? ` · ${esc(fert.name)}` : "";
-        return `<button class="deck-act" data-row="${i}" data-kind="${r.t.kind}"><span class="deck-act-lay">
+        const btnHtml = `<button class="deck-act" data-row="${i}" data-kind="${r.t.kind}"><span class="deck-act-lay">
           <span class="deck-act-icon">${r.t.kind === "water" ? "💧" : "🌾"}</span>
           <span class="deck-act-main"><b>${verb}</b><span class="deck-act-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}${fertTag}${r.wxTag || ""}</span></span>
           <span class="deck-tick">✓</span>
         </span></button>`;
+        // Feel the soil first: if it's still wet, say so — the watering
+        // clears for today without a fake log, and asks again in two days.
+        return r.t.kind === "water"
+          ? `<div class="deck-act-wrap">${btnHtml}<button class="deck-wet" data-wet="${i}" aria-label="Still wet — hold off watering"><span>💦</span><span>wet</span></button></div>`
+          : btnHtml;
       }
       const btn = `<button class="deck-act" data-row="${i}"><span class="deck-act-lay">
         <span class="deck-act-icon">${r.task.by === "Sprout AI" ? (ACTION_ICONS[r.task.kind] || "✦") : "📝"}</span>
@@ -1185,6 +1226,19 @@ async function viewToday() {
       buzz(8);
       await doRow(card, card.rows[i]);
       btn.classList.add("is-done-row");
+      btn.disabled = true;
+      if (done.size === card.rows.length) closeAnd();
+    }));
+    el.querySelectorAll(".deck-wet[data-wet]").forEach(btn => btn.addEventListener("click", async () => {
+      const i = Number(btn.dataset.wet);
+      if (done.has(i)) return;
+      done.add(i);
+      buzz(8);
+      const nextAsk = await skipWatering(card.plant.id);
+      toast(`Still wet — will ask again ${fmtDate(nextAsk)}`);
+      const row = btn.closest(".deck-act-wrap").querySelector(".deck-act");
+      row.classList.add("is-done-row");
+      row.disabled = true;
       btn.disabled = true;
       if (done.size === card.rows.length) closeAnd();
     }));
@@ -2414,6 +2468,7 @@ function openLogSheet(plantId, plantName) {
     { k: "fertilize", icon: "🌾", label: "Fertilized" },
     { k: "prune", icon: "✂️", label: "Pruned" },
     { k: "repot", icon: "🪴", label: "Repotted" },
+    { k: "check", icon: "💦", label: "Still wet" },
     { k: "note", icon: "📝", label: "Note" },
   ];
   const el = document.createElement("div");
@@ -2486,8 +2541,13 @@ function openLogSheet(plantId, plantName) {
     const date = chosenDate();
     const note = el.querySelector("#logNote").value.trim();
     const kinds = picked();
-    for (const k of kinds) await logAction(plantId, k, note, { date, quiet: true });
-    const labels = { water: "watered", fertilize: "fertilized", prune: "pruned", repot: "repotted", note: "noted" };
+    for (const k of kinds) {
+      // "Still wet" is its own path: it holds the schedule instead of writing
+      // a watering that didn't happen.
+      if (k === "check") await skipWatering(plantId, date);
+      else await logAction(plantId, k, note, { date, quiet: true });
+    }
+    const labels = { water: "watered", fertilize: "fertilized", prune: "pruned", repot: "repotted", note: "noted", check: "still wet — held off" };
     toast(`Logged: ${kinds.map(k => labels[k]).join(", ")}${date === todayStr() ? "" : " · " + fmtDate(date)}`);
     buzz([12, 40, 12]);
     close();
@@ -2669,8 +2729,8 @@ async function viewPlant(id) {
     return `<span class="badge ${cls}">${label} ${fmtDate(due)}</span>`;
   };
 
-  const logIcons = { water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️", note: "📝", ai: "✨" };
-  const logVerbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned" };
+  const logIcons = { water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️", note: "📝", ai: "✨", check: "💦" };
+  const logVerbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned", check: "Checked" };
   const logLine = (l) => {
     if (l.type === "ai") return `Health check${typeof l.score === "number" ? ` ${l.score}/10` : ""} — ${esc(l.note)}`;
     if (l.type === "note") return esc(l.note);

@@ -1141,3 +1141,15 @@ body.sheet-open { overflow: hidden; }
   background: transparent; color: var(--ink-2); font: inherit; font-size: 13px;
   padding: 6px 10px; min-height: 36px; max-width: 140px;
 }
+
+/* "Still wet" — the honest alternative next to the sheet's Water row. */
+.deck-wet {
+  flex: none; width: 52px; border: 1.5px solid var(--hairline);
+  border-radius: var(--r-field); background: var(--surface);
+  color: var(--ink-2); font: inherit; font-size: 11px; font-weight: 620;
+  cursor: pointer; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 1px;
+}
+.deck-wet span:first-child { font-size: 16px; }
+.deck-wet:active, .deck-wet:disabled { background: var(--surface-sunk); }
+.deck-wet:disabled { opacity: .5; }
