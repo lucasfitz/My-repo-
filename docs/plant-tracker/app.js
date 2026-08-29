@@ -1126,19 +1126,19 @@ async function viewToday() {
       if (r.kind === "care") {
         const verb = r.t.kind === "water" ? "Water" : "Fertilize";
         const fertTag = r.t.kind === "fertilize" && fert ? ` · ${esc(fert.name)}` : "";
-        return `<button class="deck-act" data-row="${i}" data-kind="${r.t.kind}">
+        return `<button class="deck-act" data-row="${i}" data-kind="${r.t.kind}"><span class="deck-act-lay">
           <span class="deck-act-icon">${r.t.kind === "water" ? "💧" : "🌾"}</span>
           <span class="deck-act-main"><b>${verb}</b><span class="deck-act-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}${fertTag}${r.wxTag || ""}</span></span>
           <span class="deck-tick">✓</span>
-        </button>`;
+        </span></button>`;
       }
-      const btn = `<button class="deck-act" data-row="${i}">
+      const btn = `<button class="deck-act" data-row="${i}"><span class="deck-act-lay">
         <span class="deck-act-icon">${r.task.by === "Sprout AI" ? (ACTION_ICONS[r.task.kind] || "✦") : "📝"}</span>
         <span class="deck-act-main"><b>${esc(r.task.title)}</b>${
           r.task.detail ? `<span class="deck-act-sub">${esc(r.task.detail)}</span>` : ""}${
           r.task.repeatDays ? `<span class="deck-act-sub is-repeat">↻ every ${r.task.repeatDays}d — clears for today</span>` : ""}</span>
         <span class="deck-tick">✓</span>
-      </button>`;
+      </span></button>`;
       return r.task.repeatDays
         ? `<div class="deck-act-wrap">${btn}<button class="deck-drop" data-drop="${r.task.id}" aria-label="Stop repeating this">✕</button></div>`
         : btn;

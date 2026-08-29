@@ -703,14 +703,22 @@ body.sheet-open { overflow: hidden; }
   max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* Big enough to hit while holding a watering can. */
+/* Big enough to hit while holding a watering can.
+
+   The flex layout lives on an inner span, not on the <button> itself: iOS
+   Safari won't grow a button's height from wrapped flex children — the
+   content stays centered and spills over both edges onto the neighboring
+   rows. A block button around a flex span sizes correctly everywhere. */
 .deck-act {
-  display: flex; align-items: center; gap: 12px; width: 100%;
-  min-height: 58px; padding: 10px 14px; text-align: left;
+  display: block; width: 100%; padding: 0; text-align: left;
   border: 1.5px solid var(--hairline); border-radius: var(--r-field);
   background: var(--surface); color: inherit; font: inherit;
   cursor: pointer; text-decoration: none;
   transition: transform .12s var(--ease), border-color .12s var(--ease), background .12s var(--ease);
+}
+.deck-act-lay {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  min-height: 58px; padding: 10px 14px;
 }
 .deck-act:active { transform: scale(.985); background: var(--surface-sunk); }
 .deck-act-icon { flex: none; font-size: 20px; display: flex; align-items: center; }
