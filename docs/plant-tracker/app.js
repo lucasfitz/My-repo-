@@ -384,12 +384,14 @@ function nextDue(plant, kind) {
   // watering days too, or the calendar keeps sprouting lone mid-week chips
   // that the rhythm was supposed to have cleared away.
   let due = snapToWaterDay(addDays(base, every), every);
-  /* "Checked — soil still wet" holds the watering without faking one:
+  /* "Checked — soil still wet" holds the whole visit without faking one:
      lastWatered stays honest and the due date waits out the snooze instead.
+     It holds BOTH kinds — feeding happens through the watering can, so a
+     fertilizing that's due can't happen while the watering is on hold.
      Forward-snapped onto the rhythm, never backward — a hold that lands the
      plant back on today's list would be no hold at all. An expired snooze is
      simply outrun by the natural due date. */
-  if (kind === "water" && plant.waterSnooze && plant.waterSnooze > due) {
+  if (plant.waterSnooze && plant.waterSnooze > due) {
     due = snapForwardToWaterDay(plant.waterSnooze, every);
   }
   return due;
@@ -1232,13 +1234,18 @@ async function viewToday() {
     el.querySelectorAll(".deck-wet[data-wet]").forEach(btn => btn.addEventListener("click", async () => {
       const i = Number(btn.dataset.wet);
       if (done.has(i)) return;
-      done.add(i);
       buzz(8);
       const nextAsk = await skipWatering(card.plant.id);
       toast(`Still wet — will ask again ${fmtDate(nextAsk)}`);
-      const row = btn.closest(".deck-act-wrap").querySelector(".deck-act");
-      row.classList.add("is-done-row");
-      row.disabled = true;
+      /* The hold covers the visit, and feeding happens through the can — so
+         the card's Fertilize row is off the table too, not just Water. Mark
+         every care row handled; "Did all" then skips them both. */
+      card.rows.forEach((r, j) => {
+        if (r.kind !== "care") return;
+        done.add(j);
+        const rowBtn = el.querySelector(`.deck-act[data-row="${j}"]`);
+        if (rowBtn) { rowBtn.classList.add("is-done-row"); rowBtn.disabled = true; }
+      });
       btn.disabled = true;
       if (done.size === card.rows.length) closeAnd();
     }));
