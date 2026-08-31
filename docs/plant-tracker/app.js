@@ -566,6 +566,41 @@ function toast(msg) {
    switch haptic (iOS 17.4+) — one fixed tick, which is the entire vocabulary
    available there. Browsers with neither toggle an invisible checkbox and
    feel nothing, which is the right fallback: silence, not breakage. */
+/* Overlay discipline. Every sheet in the app — the card sheet, the plant
+   chat, the log-activity sheet, the photo viewer — closes the same four
+   ways: its ✕, its backdrop, the Escape key, and the phone's back gesture.
+   The back gesture is the one that needs machinery: opening an overlay
+   pushes a history entry, so "back" pops the overlay instead of leaving the
+   screen. One overlay is ever open at a time. The page behind is
+   scroll-locked while one is up. */
+let activeOverlay = null;
+
+function overlayOpened(el, doClose) {
+  activeOverlay = { el, doClose };
+  document.body.classList.add("overlay-open");
+  history.pushState({ sproutOverlay: true }, "");
+}
+
+/* Called from an overlay's own close path. Pops the entry the open pushed —
+   unless history itself is what closed us, in which case it's already gone. */
+function overlayClosed(el, { viaHistory = false } = {}) {
+  if (!activeOverlay || activeOverlay.el !== el) return;
+  activeOverlay = null;
+  document.body.classList.remove("overlay-open");
+  if (!viaHistory && history.state && history.state.sproutOverlay) history.back();
+}
+
+window.addEventListener("popstate", () => {
+  if (!activeOverlay) return;
+  const o = activeOverlay;
+  activeOverlay = null;
+  document.body.classList.remove("overlay-open");
+  o.doClose();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && activeOverlay) activeOverlay.doClose();
+});
+
 let hapticSwitch = null;
 function buzz(pattern = 10) {
   try {
@@ -750,38 +785,6 @@ async function viewToday() {
       wxBlock = `<div class="card flat wx-card"><b>Porch weather</b><p class="subtitle" style="margin:6px 0 0">Couldn't reach the weather service — using your normal schedule for now.</p></div>`;
     }
   }
-
-  // `inRoom`: the room is already the heading above, so repeating it on every
-  // row is noise.
-  const renderCareTask = async (t, cls, { inRoom = false } = {}) => {
-    const photo = await latestPhotoURL(t.plant.id);
-    const icon = t.kind === "water" ? "💧" : "🌾";
-    const verb = t.kind === "water" ? "Water" : "Fertilize";
-    let wxTag = "";
-    if (t.kind === "water" && isOutdoorPlant(t.plant)) {
-      if (wxFlags.rainToday) wxTag = ` · <span class="wx-tag">rain may cover this</span>`;
-      else if (wxFlags.hotToday) wxTag = ` · <span class="wx-tag hot">hot — don't skip</span>`;
-      else if (wxFlags.rainAhead && t.delta >= 0) wxTag = ` · <span class="wx-tag">rain coming</span>`;
-    }
-    return `
-      <div class="task ${cls}" data-plant="${t.plant.id}" data-kind="${t.kind}">
-        <button class="task-check" data-action="complete" aria-label="Mark done">✓</button>
-        ${photo ? `<img class="task-thumb" src="${photo}" alt="">` : `<div class="task-thumb" style="display:grid;place-items:center">${plantEmoji(t.plant)}</div>`}
-        <div class="task-body">
-          <div class="task-title">${verb} ${esc(t.plant.name)}</div>
-          <div class="task-sub">${!inRoom && t.plant.location ? esc(t.plant.location) + " · " : ""}${dueLabel(t.due)}${wxTag}</div>
-        </div>
-        <a class="task-go" href="#/plant/${t.plant.id}" aria-label="Open ${esc(t.plant.name)}">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
-        </a>
-      </div>`;
-  };
-
-  const section = async (title, list, cls) => {
-    if (!list.length) return "";
-    const items = await Promise.all(list.map(t => renderCareTask(t, cls)));
-    return `<h2>${title}</h2>${items.join("")}`;
-  };
 
   /* One agenda: room by room, plant by plant.
 
@@ -1090,7 +1093,8 @@ async function viewToday() {
   /* The deck. Everything re-renders after a record changes; a card with
      nothing left on it simply isn't in the next deal, and render() keeps the
      scroll position, so the list just gets shorter under your thumb. */
-  document.getElementById("cardSheet")?.remove(); // a sync mid-sheet would leave it stale
+  const staleSheet = document.getElementById("cardSheet");
+  if (staleSheet) { overlayClosed(staleSheet); staleSheet.remove(); } // a sync mid-sheet would leave it stale
 
   $view().querySelectorAll(".room-chip").forEach(ch => ch.addEventListener("click", () => {
     todayRoom = ch.dataset.room;
@@ -1155,7 +1159,8 @@ async function viewToday() {
      step reads in whole sentences with its reasoning, where a standing chore
      can be stopped, and where the species' own care notes sit. */
   const openSheet = async (card) => {
-    document.getElementById("cardSheet")?.remove();
+    const prior = document.getElementById("cardSheet");
+    if (prior) { overlayClosed(prior); prior.remove(); }
     const g = card.plant ? guideEntry(card.plant.speciesKey) : null;
     const photo = card.plant ? await latestPhotoURL(card.plant.id) : null;
     // Which bottle to reach for, right where the job is.
@@ -1218,7 +1223,8 @@ async function viewToday() {
     requestAnimationFrame(() => el.classList.add("open"));
 
     const done = new Set();
-    const closeAnd = () => { el.remove(); render(); };
+    const closeAnd = () => { el.remove(); overlayClosed(el); render(); };
+    overlayOpened(el, closeAnd);
     el.addEventListener("click", e => { if (e.target === el) closeAnd(); });
     el.querySelector(".sheet-close").addEventListener("click", closeAnd);
     el.querySelectorAll(".deck-act[data-row]").forEach(btn => btn.addEventListener("click", async () => {
@@ -1353,21 +1359,6 @@ async function viewToday() {
     }, { passive: true });
   }
 
-  $view().querySelectorAll("[data-action=complete]").forEach(btn => {
-    btn.addEventListener("click", async e => {
-      const row = e.target.closest("[data-kind]");
-      await logAction(row.dataset.plant, row.dataset.kind);
-      render();
-    });
-  });
-  /* Expanding is view-only: no record changes, so it re-renders nothing and
-     the row simply grows. */
-  $view().querySelectorAll("[data-action=expand]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const open = btn.closest(".ag-row").classList.toggle("is-open");
-      btn.setAttribute("aria-expanded", String(open));
-    });
-  });
   $view().querySelectorAll("[data-action=toggle-task]").forEach(btn => {
     btn.addEventListener("click", async e => {
       const id = e.target.closest("[data-task]").dataset.task;
@@ -2469,7 +2460,8 @@ async function applyStepToPlan(plant, action) {
    gets logged when you sit down, not when you do it. A backdated watering
    never moves the schedule backwards; logAction guards that. */
 function openLogSheet(plantId, plantName) {
-  document.getElementById("logSheet")?.remove();
+  const priorLog = document.getElementById("logSheet");
+  if (priorLog) { overlayClosed(priorLog); priorLog.remove(); }
   const KINDS = [
     { k: "water", icon: "💧", label: "Watered" },
     { k: "fertilize", icon: "🌾", label: "Fertilized" },
@@ -2503,7 +2495,8 @@ function openLogSheet(plantId, plantName) {
   document.body.appendChild(el);
   requestAnimationFrame(() => el.classList.add("open"));
 
-  const close = () => el.remove();
+  const close = () => { el.remove(); overlayClosed(el); };
+  overlayOpened(el, close);
   el.addEventListener("click", e => { if (e.target === el) close(); });
   el.querySelector("#logClose").addEventListener("click", close);
 
@@ -2568,7 +2561,8 @@ function openLogSheet(plantId, plantName) {
    keeps the changes (and the history keeps a line per edit); the
    conversation itself isn't something to sync or store. */
 function openPlantChat(plantId, plantName) {
-  document.getElementById("plantChat")?.remove();
+  const priorChat = document.getElementById("plantChat");
+  if (priorChat) { overlayClosed(priorChat); priorChat.remove(); }
   const transcript = [];
   const el = document.createElement("div");
   el.id = "plantChat";
@@ -2593,7 +2587,8 @@ function openPlantChat(plantId, plantName) {
   const log = el.querySelector("#chatLog");
   const input = el.querySelector("#chatText");
   const form = el.querySelector("#chatForm");
-  const close = () => el.remove();
+  const close = () => { el.remove(); overlayClosed(el); };
+  overlayOpened(el, close);
   el.addEventListener("click", e => { if (e.target === el) close(); });
   el.querySelector("#chatClose").addEventListener("click", close);
 
@@ -2922,7 +2917,8 @@ async function openPhotoViewer(photoId, plantId) {
     <img src="${url}" alt="">`;
   document.body.appendChild(div);
   // This one lives outside #view, so it isn't covered by the per-view release.
-  const close = () => { div.remove(); URL.revokeObjectURL(url); };
+  const close = () => { div.remove(); URL.revokeObjectURL(url); overlayClosed(div); };
+  overlayOpened(div, close);
   div.addEventListener("click", e => { if (e.target === div) close(); });
   div.querySelector("#pvClose").addEventListener("click", close);
   div.querySelector("#pvDelete").addEventListener("click", async () => {
