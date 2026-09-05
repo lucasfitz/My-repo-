@@ -829,12 +829,16 @@ async function viewToday() {
       summoned.add(t.plant.id);
       rows.push({ kind: "care", t, wxTag, plant: t.plant, urgency: AGENDA_ORDER.care + Math.min(0, t.delta) });
     }
-    const byId = new Map(plants.map(p => [p.id, p]));
+    const byId = new Map(plants.filter(p => !p.archived).map(p => [p.id, p]));
     const open = custom.filter(t => !t.done && !(t.due && t.due > todayStr()));
     for (const task of open) {
       if (task.by !== "Sprout AI") summoned.add(task.plantId);
     }
     for (const task of open) {
+      /* "Anything else" is for chores that were never about a plant. A task
+         whose plant is archived waits with the plant; one whose plant is gone
+         is an orphan (the boot sweep resolves those) — neither is dealt. */
+      if (task.plantId && !byId.has(task.plantId)) continue;
       const plant = byId.get(task.plantId) || null;
       if (task.by === "Sprout AI" && plant && !summoned.has(plant.id) &&
           (nextDue(plant, "water") || nextDue(plant, "fertilize"))) continue;
@@ -2929,6 +2933,9 @@ async function viewPlant(id) {
     for (const ph of photos) await removeRecord("photos", ph.id);
     const allLogs = await dbAllByIndex("logs", "plantId", id);
     for (const l of allLogs) await removeRecord("logs", l.id);
+    // Its steps go with it — an orphaned step used to fall through to the
+    // "Anything else" card and haunt Today with advice for a plant that's gone.
+    for (const t of await dbAll("tasks")) if (t.plantId === id) await removeRecord("tasks", t.id);
     await removeRecord("plants", id);
     toast(`${p.name} removed`);
     location.hash = "#/plants";
@@ -4076,6 +4083,24 @@ async function render() {
       }
     }
     if (pruned) { console.log(`Sprout: retired ${pruned} superseded health step(s)`); render(); }
+  })().catch(() => {});
+
+  /* Orphans: tasks whose plant no longer exists (deleted before deletion
+     took its tasks along). AI steps about a gone plant are meaningless and
+     go; a person's task keeps its words and drops the dead link, so it shows
+     honestly as a loose chore instead of hiding behind a plant that isn't
+     there. Fertilizer assignments pointing at gone plants need nothing —
+     they live on the plant record, which is the thing that's gone. */
+  (async () => {
+    const living = new Set((await dbAll("plants")).map(p => p.id));
+    let fixed = 0;
+    for (const t of await dbAll("tasks")) {
+      if (!t.plantId || living.has(t.plantId)) continue;
+      if (t.by === "Sprout AI") await removeRecord("tasks", t.id);
+      else { t.plantId = ""; t.plantName = ""; await saveRecord("tasks", t); }
+      fixed++;
+    }
+    if (fixed) { console.log(`Sprout: resolved ${fixed} orphaned task(s)`); render(); }
   })().catch(() => {});
 
   if (syncConfigured()) syncConnect().catch(() => {});
