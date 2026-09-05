@@ -241,9 +241,11 @@ const HEALTH_SCHEMA = {
         required: ["title", "detail", "kind", "due_in_days", "repeat_every_days", "water_every_days", "fert_every_days"],
         additionalProperties: false
       },
-      description: "Concrete steps, most important first. Every issue above needs a step here that fixes it. " +
-        "These land on the owner's checklist automatically, each on its scheduled day, so only include steps worth " +
-        "doing — and never a duplicate of routine care the schedule already covers. " +
+      description: "Concrete steps, most important first, five at most. Every issue above needs a step here that fixes it. " +
+        "These land on the owner's checklist automatically and REPLACE the previous check's open steps, so restate " +
+        "anything still needed and omit what's done. Never two steps saying the same thing, and never a step that just " +
+        "restates scheduled watering or feeding — technique for those (soak through, empty the saucer) goes in a step of " +
+        "kind water/fertilize, which rides the scheduled row rather than adding one. " +
         "Set an interval field only when the standing schedule is wrong — a one-off soak is an action, not a schedule change."
     }
   },
@@ -269,6 +271,7 @@ async function aiAssessPlant(plantId) {
   }
   const logs = await dbAllByIndex("logs", "plantId", plantId);
   const env = await describeEnvironment(plant);
+  const openSteps = (await dbAll("tasks")).filter(t => t.plantId === plantId && !t.done && isHealthStep(t));
 
   const content = [];
   // Oldest → newest so "the last photo is current state" reads naturally
@@ -295,7 +298,9 @@ Last watered: ${plant.lastWatered || "unknown"}. Last fertilized: ${plant.lastFe
 Species guidance: ${g.light}. ${g.tips}
 ${plant.notes ? `Owner's notes: ${plant.notes}` : ""}
 Recent care history:
-${describeCareHistory(logs) || "(none recorded)"}`,
+${describeCareHistory(logs) || "(none recorded)"}
+Steps still open from your last check (your new list REPLACES these — restate any that still need doing, drop the rest, never repeat one twice):
+${openSteps.length ? openSteps.map(t => `- ${t.title}${t.repeatDays ? ` (every ${t.repeatDays}d)` : ""}`).join("\n") : "(none)"}`,
   });
 
   const result = await askClaude({

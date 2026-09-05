@@ -873,7 +873,20 @@ async function viewToday() {
       byPlant.get(key).rows.push(r);
     }
     const cards = [...byPlant.values()];
+    /* "Water until it runs freely, then empty the saucer" is not a second
+       job next to Water — it's how to do the watering. A health step whose
+       kind is water or fertilize folds into that care row as a hint when the
+       row is on the card; completing the row completes the hint. Without a
+       matching row it stands alone, as before. */
     for (const c of cards) {
+      const careOf = kind => c.rows.find(r => r.kind === "care" && r.t.kind === kind);
+      c.rows = c.rows.filter(r => {
+        if (r.kind !== "task" || !isHealthStep(r.task)) return true;
+        const host = (r.task.kind === "water" || r.task.kind === "fertilize") ? careOf(r.task.kind) : null;
+        if (!host) return true;
+        (host.hints = host.hints || []).push(r.task);
+        return false;
+      });
       c.rows.sort((a, b) => a.urgency - b.urgency);
       c.urgency = Math.min(...c.rows.map(r => r.urgency));
     }
@@ -1106,20 +1119,23 @@ async function viewToday() {
 
   // One row at a time, awaited: two writes to the same plant in flight at
   // once would have the second overwrite the first's lastWatered.
+  const finishTask = async id => {
+    const t = await dbGet("tasks", id);
+    if (!t) return;
+    // A standing chore clears for today and books itself back in — done
+    // would end it, and the ✕ in the sheet is how it stops for good.
+    if (t.repeatDays > 0) {
+      t.due = addDays(todayStr(), t.repeatDays);
+      toast(`Done — back on ${fmtDate(t.due)}`);
+    } else t.done = true;
+    await saveRecord("tasks", t);
+  };
   const doRow = async (card, r) => {
     todayLastRoom = card.room;
-    if (r.kind === "care") await logAction(r.t.plant.id, r.t.kind);
-    else {
-      const t = await dbGet("tasks", r.task.id);
-      if (!t) return;
-      // A standing chore clears for today and books itself back in — done
-      // would end it, and the ✕ in the sheet is how it stops for good.
-      if (t.repeatDays > 0) {
-        t.due = addDays(todayStr(), t.repeatDays);
-        toast(`Done — back on ${fmtDate(t.due)}`);
-      } else t.done = true;
-      await saveRecord("tasks", t);
-    }
+    if (r.kind === "care") {
+      await logAction(r.t.plant.id, r.t.kind);
+      for (const h of r.hints || []) await finishTask(h.id);
+    } else await finishTask(r.task.id);
   };
 
   const rowForEl = (card, el) => card.rows.find(r => r.kind === "care"
@@ -1169,9 +1185,11 @@ async function viewToday() {
       if (r.kind === "care") {
         const verb = r.t.kind === "water" ? "Water" : "Fertilize";
         const fertTag = r.t.kind === "fertilize" && fert ? ` · ${esc(fert.name)}` : "";
+        const hints = (r.hints || []).map(h =>
+          `<span class="deck-act-sub deck-hint-line">↳ ${esc(h.title)}</span>`).join("");
         const btnHtml = `<button class="deck-act" data-row="${i}" data-kind="${r.t.kind}"><span class="deck-act-lay">
           <span class="deck-act-icon">${r.t.kind === "water" ? "💧" : "🌾"}</span>
-          <span class="deck-act-main"><b>${verb}</b><span class="deck-act-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}${fertTag}${r.wxTag || ""}</span></span>
+          <span class="deck-act-main"><b>${verb}</b><span class="deck-act-sub${r.t.delta < 0 ? " is-late" : ""}">${dueLabel(r.t.due)}${fertTag}${r.wxTag || ""}</span>${hints}</span>
           <span class="deck-tick">✓</span>
         </span></button>`;
         // Feel the soil first: if it's still wet, say so — the watering
@@ -2297,9 +2315,10 @@ function actionSchedule(action) {
   return { due: addDays(todayStr(), dueIn), repeatDays: repeat };
 }
 
-async function addStepAsTask(plant, action, taskId) {
+async function addStepAsTask(plant, action, taskId, { source = "health" } = {}) {
   await saveRecord("tasks", {
     id: taskId,
+    source,
     title: action.title,
     // The step's reasoning was being dropped on the floor. A step reads as an
     // instruction; the detail is why, and it's what you want when the
@@ -2329,15 +2348,49 @@ async function addStepAsTask(plant, action, taskId) {
    than duplicates. Assessments older than a week (from before this existed,
    or a phone that was off) are flagged without creating anything — week-old
    advice flooding today's deck helps nobody. */
+/* A health step's task id is ai_<plant>_<assessment time>_<index>, so the
+   assessment a step came from is readable off the id — which is what lets a
+   newer assessment retire an older one's leftovers. Chat-added steps use
+   plain uids and are never touched here: those were asked for. */
+function isHealthStep(task) {
+  return task.source === "health" || /^ai_/.test(task.id || "");
+}
+function healthStepPrefix(plantId, at) {
+  return `ai_${plantId}_${Date.parse(at).toString(36)}_`;
+}
+
+/* The latest assessment owns the plant's steps.
+
+   Every health check (and there is one per photo) used to ADD its steps
+   while the previous check's still-open steps stayed — so a plant checked
+   three times carried three near-identical "wipe the leaves", two rotations
+   on different rhythms, and a card nobody could clear. A new assessment now
+   replaces the old one's open steps: it was written seeing them (the prompt
+   lists them), told to restate anything still needed and drop the rest.
+   Done steps stay done — they're history. Human tasks and chat requests are
+   untouched. Duplicate titles within one assessment collapse, and no
+   assessment puts more than five steps on a card. */
 async function materializeHealthTasks(plant) {
   const h = plant.health;
   if (!h || !Array.isArray(h.actions) || h.tasked) return;
   h.tasked = true;
   const fresh = h.at && Date.now() - Date.parse(h.at) < 7 * DAY;
   if (fresh) {
-    for (let i = 0; i < h.actions.length; i++) {
+    const keep = healthStepPrefix(plant.id, h.at);
+    for (const t of await dbAll("tasks")) {
+      if (t.plantId !== plant.id || t.done || !isHealthStep(t)) continue;
+      if (!t.id.startsWith(keep)) await removeRecord("tasks", t.id);
+    }
+    const seen = new Set();
+    let placed = 0;
+    for (let i = 0; i < h.actions.length && placed < 5; i++) {
+      const a = h.actions[i];
+      const key = (a.title || "").trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
       const id = actionTaskId(plant.id, h.at, i);
-      if (!(await dbGet("tasks", id))) await addStepAsTask(plant, h.actions[i], id);
+      if (!(await dbGet("tasks", id))) await addStepAsTask(plant, a, id, { source: "health" });
+      placed++;
     }
   }
   await saveRecord("plants", plant);
@@ -2404,7 +2457,7 @@ async function applyChatChanges(plantId, res) {
     if (!a.title || !a.title.trim()) continue;
     await saveRecord("tasks", {
       id: uid(), title: a.title.trim(), detail: a.detail || "", done: false,
-      by: "Sprout AI", kind: a.kind || "", plantId: plant.id, plantName: plant.name,
+      by: "Sprout AI", source: "chat", kind: a.kind || "", plantId: plant.id, plantName: plant.name,
       ...actionSchedule(a), createdAt: new Date().toISOString(),
     });
     changes.push(`added: ${a.title.trim()}`);
@@ -3998,6 +4051,32 @@ async function render() {
       render();
     }
   })().catch(() => { /* cosmetic sweep — never worth failing the boot over */ });
+
+  /* Prune the pile-up from before assessments superseded each other: for
+     every plant, only the LATEST assessment's open health steps stay, and a
+     title repeated within it collapses to one. Human tasks, chat requests
+     and done steps are never touched. Only removes; runs quiet once the
+     shelf is clean. */
+  (async () => {
+    const stamp = t => { const m = /^ai_[0-9a-z]+_([0-9a-z]+)_\d+$/.exec(t.id || ""); return m ? parseInt(m[1], 36) : Date.parse(t.createdAt || 0); };
+    const byPlant = new Map();
+    for (const t of await dbAll("tasks")) {
+      if (t.done || !t.plantId || !isHealthStep(t)) continue;
+      if (!byPlant.has(t.plantId)) byPlant.set(t.plantId, []);
+      byPlant.get(t.plantId).push(t);
+    }
+    let pruned = 0;
+    for (const list of byPlant.values()) {
+      const latest = Math.max(...list.map(stamp));
+      const seen = new Set();
+      for (const t of list.sort((a, b) => stamp(b) - stamp(a))) {
+        const key = (t.title || "").trim().toLowerCase();
+        if (stamp(t) < latest || seen.has(key)) { await removeRecord("tasks", t.id); pruned++; }
+        else seen.add(key);
+      }
+    }
+    if (pruned) { console.log(`Sprout: retired ${pruned} superseded health step(s)`); render(); }
+  })().catch(() => {});
 
   if (syncConfigured()) syncConnect().catch(() => {});
   maybeAutoSyncCalendar();
