@@ -236,9 +236,17 @@ const HEALTH_SCHEMA = {
           fert_every_days: {
             type: "integer",
             description: "New fertilizing interval in days if the routine itself should change; 0 to leave the schedule alone"
+          },
+          hold_until: {
+            type: "string",
+            description: "YYYY-MM-DD, or \"\". For advice that means STOP a routine until a date — 'skip fertilizer " +
+              "until March', 'no feeding before spring' — the date the routine resumes. Give kind water or fertilize; " +
+              "the app keeps that routine off the owner's list until then. Waiting is not a step anyone can tick " +
+              "off, so the title is what to do WHEN it resumes ('Feed once at half-strength balanced liquid'), " +
+              "never the waiting itself."
           }
         },
-        required: ["title", "detail", "kind", "due_in_days", "repeat_every_days", "water_every_days", "fert_every_days"],
+        required: ["title", "detail", "kind", "due_in_days", "repeat_every_days", "water_every_days", "fert_every_days", "hold_until"],
         additionalProperties: false
       },
       description: "Concrete steps, most important first, five at most. Every issue above needs a step here that fixes it. " +
@@ -246,7 +254,9 @@ const HEALTH_SCHEMA = {
         "anything still needed and omit what's done. Never two steps saying the same thing, and never a step that just " +
         "restates scheduled watering or feeding — technique for those (soak through, empty the saucer) goes in a step of " +
         "kind water/fertilize, which rides the scheduled row rather than adding one. " +
-        "Set an interval field only when the standing schedule is wrong — a one-off soak is an action, not a schedule change."
+        "Set an interval field only when the standing schedule is wrong — a one-off soak is an action, not a schedule change. " +
+        "Every step must be something the owner can DO with their hands on its day. 'Skip / hold off / wait until <month>' " +
+        "is not a step — it is a hold: set hold_until and title the step with what happens when the hold ends."
     }
   },
   required: ["health_score", "status", "trend", "summary", "observations", "issues", "actions"],
@@ -294,7 +304,7 @@ async function aiAssessPlant(plantId) {
 Plant: "${plant.name}" — ${plant.species || g.name}${g.latin ? ` (${g.latin})` : ""}
 Location: ${plant.location || "unspecified"}. ${env}
 Care schedule: water every ${plant.waterEvery || "—"} days, fertilize every ${plant.fertEvery || "—"} days.
-Last watered: ${plant.lastWatered || "unknown"}. Last fertilized: ${plant.lastFertilized || "never"}.
+Last watered: ${plant.lastWatered || "unknown"}. Last fertilized: ${plant.lastFertilized || "never"}.${plant.fertHoldUntil && plant.fertHoldUntil > todayStr() ? ` Feeding is on hold until ${plant.fertHoldUntil}.` : ""}
 Species guidance: ${g.light}. ${g.tips}
 ${plant.notes ? `Owner's notes: ${plant.notes}` : ""}
 Recent care history:
@@ -630,6 +640,10 @@ const ACTION_ICONS = {
 // When a step happens, in words. New assessments carry numbers; ones stored
 // before the schema learned to schedule only had a phrase, which still reads.
 function actionWhenLabel(act) {
+  // A hold reads as a hold, whether the model filled hold_until or wrote
+  // "skip until March" into the title and the app worked out the date.
+  const hold = stepHold(act);
+  if (hold) return `on hold until ${fmtDate(hold.until)}${hold.then ? " — then this" : ""}`;
   if (act.repeat_every_days > 0) return `every ${act.repeat_every_days}d`;
   if (Number.isInteger(act.due_in_days)) {
     return act.due_in_days <= 0 ? "today"
