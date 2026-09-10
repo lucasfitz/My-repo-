@@ -1,17 +1,35 @@
 /* Sprout cloud sync — real-time shared data via a user-provided Supabase project.
    Local-first: IndexedDB stays the source of truth on each device; changes are
    queued in an outbox and pushed, remote changes arrive via realtime + pulls.
-   Conflict resolution: last-write-wins on each record's updatedAt. */
+   Conflict resolution: last-write-wins on each record's updatedAt.
+   Two clocks matter and they are different things: a record's updatedAt (when
+   it was edited, decides conflicts) and a row's updated_at (when it reached
+   the cloud, decides what a pull has yet to see). */
 "use strict";
 
 const SYNC = {
   client: null,
   channel: null,
-  status: "off",      // off | connecting | online | error
+  status: "off",      // off | connecting | online | stuck | error
   statusMsg: "",
+  stuck: 0,           // outbox items the cloud keeps refusing
+  live: false,        // realtime channel joined: changes arrive as they happen
+  joins: 0,           // how many times the channel has (re)joined
   flushing: false,
+  pulling: false,
   pullTimer: null,
+  lastPullAt: 0,      // Date.now() of the last completed pull
 };
+
+// How often to look for changes when the realtime channel is carrying them
+// (a backstop) versus when it isn't (the only way anything arrives).
+const PULL_EVERY_LIVE = 60 * 1000;
+const PULL_EVERY_POLLING = 15 * 1000;
+// Re-read this much history on every incremental pull. Two phones stamp rows
+// from their own clocks, so a row can land with a time just before a cursor
+// the other phone already passed. Last-write-wins makes re-applying a row
+// harmless, so overlap costs nothing but a few bytes.
+const PULL_OVERLAP = 10 * 60 * 1000;
 
 // "species" rides along: a species learned on one phone should not have to be
 // learned again on the other. Settings stay out — they hold the API key.
@@ -130,6 +148,8 @@ function syncFriendlyError(msg) {
     return "that key wasn't accepted. Copy the anon public key from Supabase → Settings → API (not the service_role or database password).";
   if (/Failed to fetch|NetworkError|ENOTFOUND|ERR_NAME/i.test(m))
     return "couldn't reach that URL. Check the Project URL from Supabase → Settings → API, and that you're online.";
+  if (/Bucket not found|bucket/i.test(m))
+    return "the photo bucket doesn't exist yet. Re-run the setup script in Supabase → SQL Editor; it creates the bucket.";
   if (/permission denied|row-level security|violates/i.test(m))
     return "the database refused the write. Re-run the setup script — it grants the access Sprout needs.";
   return m;
@@ -137,8 +157,11 @@ function syncFriendlyError(msg) {
 
 function syncStatusText() {
   switch (SYNC.status) {
-    case "online": return "🟢 Connected — changes sync live";
+    case "online": return SYNC.live
+      ? "🟢 Connected — changes sync live"
+      : "🟢 Connected — live updates off, checking every 15s";
     case "connecting": return "🟡 Connecting…";
+    case "stuck": return `🟠 Connected, but ${SYNC.stuck} change${SYNC.stuck === 1 ? "" : "s"} can't upload — ` + syncFriendlyError(SYNC.statusMsg);
     case "error": return "🔴 Not connected — " + syncFriendlyError(SYNC.statusMsg);
     default: return "⚪ Sync is off";
   }
@@ -175,20 +198,36 @@ function scheduleFlush() {
 async function syncFlushOutbox() {
   if (!SYNC.client || SYNC.flushing) return;
   SYNC.flushing = true;
+  let firstError = "", failed = 0;
   try {
     const items = (await dbAll("outbox")).sort((a, b) => a.at.localeCompare(b.at));
     for (const it of items) {
-      if (it.op === "put") {
-        const rec = await dbGet(it.store, it.recordId);
-        if (rec) await syncPushRecord(it.store, rec);
-      } else {
-        await syncPushDelete(it.store, it.recordId);
+      try {
+        if (it.op === "put") {
+          const rec = await dbGet(it.store, it.recordId);
+          if (rec) await syncPushRecord(it.store, rec);
+        } else {
+          await syncPushDelete(it.store, it.recordId);
+        }
+        await dbDel("outbox", it.id);
+      } catch (e) {
+        /* One stuck change must not hold up the rest. This loop used to stop
+           at the first failure, so a photo the bucket refused sat at the head
+           of the queue and every watering logged after it never left this
+           phone. Leave the failed one queued for the next flush and carry on. */
+        it.tries = (it.tries || 0) + 1;
+        it.lastError = e.message || String(e);
+        await dbPut("outbox", it);
+        firstError = firstError || it.lastError;
+        failed++;
       }
-      await dbDel("outbox", it.id);
     }
-    if (SYNC.status === "error") syncSetStatus("online");
-  } catch (e) {
-    syncSetStatus("error", e.message || "push failed");
+    SYNC.stuck = failed;
+    if (!firstError) { if (SYNC.status === "error" || SYNC.status === "stuck") syncSetStatus("online"); }
+    // Can't reach the cloud at all: that's a connection problem. Reached it
+    // and it refused something: the connection is fine, one change isn't.
+    else if (/Failed to fetch|NetworkError|Load failed/i.test(firstError)) syncSetStatus("error", firstError);
+    else syncSetStatus("stuck", firstError);
   } finally {
     SYNC.flushing = false;
   }
@@ -211,13 +250,20 @@ async function syncPushRecord(store, rec) {
       if (up.error) throw new Error("photo upload: " + up.error.message);
     }
   }
+  /* updated_at is when the row REACHED the cloud, not when the record was
+     edited — the record's own updatedAt (inside data) still decides which of
+     two edits wins. The other phone pulls "everything since my last pull" by
+     this column, so it has to be monotonic with arrival: a watering logged at
+     9:00 and pushed at 11:00 (phone locked before the outbox flushed) used to
+     land stamped 9:00, behind a cursor the other phone had long since passed,
+     and never showed up there at all. */
   const { error } = await SYNC.client.from("records").upsert({
     id: cloudId(store, rec.id),
     household: s.household,
     store,
     data,
     deleted: false,
-    updated_at: rec.updatedAt || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   });
   if (error) throw new Error(error.message);
 }
@@ -268,17 +314,21 @@ async function applyRemoteRow(row) {
 
   const local = await dbGet(row.store, recId);
   const incomingAt = row.data.updatedAt || row.updated_at || "";
-  if (local && (local.updatedAt || "") >= incomingAt) return; // ours is same or newer
+  if (local && (local.updatedAt || "") >= incomingAt) {
+    // Ours is the same or newer. A photo whose image never downloaded is
+    // still worth another try, though: the other phone's upload may simply
+    // have landed after we first saw the record.
+    if (row.store === "photos" && !local.blob) {
+      const blob = await downloadPhotoBlob(recId);
+      if (blob) { local.blob = blob; await dbPut("photos", local); scheduleRemoteRender(); }
+    }
+    return;
+  }
 
   const rec = Object.assign({}, row.data);
   if (row.store === "photos") {
-    if (local && local.blob) rec.blob = local.blob;
-    else {
-      const s = state.settings.sync;
-      const dl = await SYNC.client.storage.from(PHOTO_BUCKET)
-        .download(s.household + "/" + recId + ".jpg");
-      if (!dl.error && dl.data) rec.blob = dl.data;
-    }
+    rec.blob = (local && local.blob) || await downloadPhotoBlob(recId) || undefined;
+    if (!rec.blob) delete rec.blob;
   }
   await dbPut(row.store, rec);
   // Household preferences are the one synced store that also lives in memory:
@@ -288,14 +338,32 @@ async function applyRemoteRow(row) {
   scheduleRemoteRender();
 }
 
+async function downloadPhotoBlob(recId) {
+  const s = state.settings.sync;
+  try {
+    const dl = await SYNC.client.storage.from(PHOTO_BUCKET)
+      .download(s.household + "/" + recId + ".jpg");
+    return (!dl.error && dl.data) ? dl.data : null;
+  } catch { return null; }
+}
+
 // ---------------------------------------------------------------------------
 // Pull (incremental, paged) + realtime subscription
 // ---------------------------------------------------------------------------
-async function syncPull() {
-  if (!SYNC.client) return;
+// A full pull re-reads the household from the start — used when connecting,
+// so a phone that missed rows for any reason (the old cursor bug included)
+// catches up once, and for "Sync now", which should mean it.
+async function syncPull({ full = false } = {}) {
+  if (!SYNC.client || SYNC.pulling) return;
+  SYNC.pulling = true;
   const s = state.settings.sync;
   try {
-    let since = s.lastPullAt || "";
+    let since = "";
+    if (!full && s.lastPullAt) {
+      const t = Date.parse(s.lastPullAt);
+      since = isNaN(t) ? s.lastPullAt : new Date(t - PULL_OVERLAP).toISOString();
+    }
+    let newest = s.lastPullAt || "";
     for (;;) {
       let q = SYNC.client.from("records").select("*")
         .eq("household", s.household)
@@ -305,31 +373,48 @@ async function syncPull() {
       const { data, error } = await q;
       if (error) throw new Error(error.message);
       if (!data || !data.length) break;
-      for (const row of data) await applyRemoteRow(row);
+      for (const row of data) {
+        // One row we can't apply must not stop the rest, or hold the cursor
+        // back so every pull trips over it again.
+        try { await applyRemoteRow(row); }
+        catch (e) { console.warn("Sprout sync: could not apply", row.id, e); }
+      }
       since = data[data.length - 1].updated_at;
-      s.lastPullAt = since;
-      await saveSettings();
+      if (Date.parse(since) > (Date.parse(newest) || 0)) newest = since;
       if (data.length < 500) break;
     }
+    if (newest !== (s.lastPullAt || "")) { s.lastPullAt = newest; await saveSettings(); }
+    SYNC.lastPullAt = Date.now();
     if (SYNC.status === "error") syncSetStatus("online");
   } catch (e) {
     syncSetStatus("error", e.message || "pull failed");
+  } finally {
+    SYNC.pulling = false;
   }
 }
 
 function syncSubscribe() {
   const s = state.settings.sync;
-  if (SYNC.channel) { SYNC.client.removeChannel(SYNC.channel); SYNC.channel = null; }
+  if (SYNC.channel) { try { SYNC.client.removeChannel(SYNC.channel); } catch { /* already gone */ } SYNC.channel = null; }
+  SYNC.live = false;
   try {
     SYNC.channel = SYNC.client.channel("sprout-" + s.household)
       .on("postgres_changes",
         { event: "*", schema: "public", table: "records", filter: "household=eq." + s.household },
         payload => { applyRemoteRow(payload.new).catch(() => {}); })
-      .subscribe(status => {
-        if (status === "SUBSCRIBED") syncSetStatus("online");
-        // On channel errors we stay usable: outbox + periodic pull still sync.
+      .subscribe((status, err) => {
+        /* The channel drops whenever the phone sleeps; the library rejoins it
+           on its own. "Live" is only true while it's actually joined — the
+           status line used to claim it from the moment the database answered,
+           whether or not realtime was ever enabled on the project. */
+        SYNC.live = status === "SUBSCRIBED";
+        if (err) console.warn("Sprout sync: realtime " + status, err.message || err);
+        // Rejoined after a gap: whatever changed while the socket was down
+        // never came through it. Fetch it rather than wait for the timer.
+        if (SYNC.live && SYNC.joins++ > 0) syncPull().catch(() => {});
+        if (SYNC.status === "online") syncSetStatus("online"); // refresh the wording
       });
-  } catch { /* realtime unavailable; periodic pull covers us */ }
+  } catch { SYNC.live = false; /* realtime unavailable; polling covers us */ }
 }
 
 // Give every not-yet-synced local record a timestamp and queue it for upload.
@@ -356,14 +441,16 @@ async function syncConnect(seed = false) {
     if (probe.error) throw new Error(probe.error.message);
     syncSetStatus("online");
     if (seed) await syncSeedLocal();
+    SYNC.joins = 0;
     await syncFlushOutbox();
-    await syncPull();
+    await syncPull({ full: true });
     syncSubscribe();
     clearInterval(SYNC.pullTimer);
     SYNC.pullTimer = setInterval(() => {
       syncFlushOutbox().catch(() => {});
-      syncPull().catch(() => {});
-    }, 60 * 1000);
+      const every = SYNC.live ? PULL_EVERY_LIVE : PULL_EVERY_POLLING;
+      if (Date.now() - SYNC.lastPullAt >= every - 500) syncPull().catch(() => {});
+    }, PULL_EVERY_POLLING);
     return true;
   } catch (e) {
     syncSetStatus("error", e.message || "could not connect");
@@ -376,6 +463,7 @@ async function syncDisconnect() {
   clearInterval(SYNC.pullTimer);
   SYNC.channel = null;
   SYNC.client = null;
+  SYNC.live = false;
   state.settings.sync = null;
   await saveSettings();
   syncSetStatus("off");
