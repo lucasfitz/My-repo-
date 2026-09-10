@@ -1229,14 +1229,16 @@ async function viewToday() {
       <div class="sheet" role="dialog" aria-label="${card.plant ? esc(card.plant.name) : "Checklist"}">
         <div class="sheet-grip"></div>
         <div class="sheet-head">
+          ${card.plant ? `<a class="sheet-plant" href="#/plant/${card.plant.id}" aria-label="Open ${esc(card.plant.name)}">` : `<div class="sheet-plant">`}
           ${photo ? `<img class="sheet-thumb" src="${photo}" alt="">`
                   : `<div class="sheet-thumb" style="display:grid;place-items:center">${card.plant ? plantEmoji(card.plant) : "📋"}</div>`}
           <div class="sheet-title">
-            <b>${card.plant ? esc(card.plant.name) : "Anything else"}</b>
+            <b>${card.plant ? esc(card.plant.name) : "Anything else"}${card.plant ? `<span class="sheet-go">›</span>` : ""}</b>
             <span>${card.plant
               ? esc([card.plant.species || (g && g.name), roomLabel(card.room)].filter(Boolean).join(" · "))
               : "Not tied to a plant"}</span>
           </div>
+          ${card.plant ? "</a>" : "</div>"}
           <button class="sheet-close" aria-label="Close">✕</button>
         </div>
         <div class="sheet-body">
@@ -1257,6 +1259,19 @@ async function viewToday() {
     overlayOpened(el, closeAnd);
     el.addEventListener("click", e => { if (e.target === el) closeAnd(); });
     el.querySelector(".sheet-close").addEventListener("click", closeAnd);
+    /* The plant's name is the way into its profile — history, photos, chat.
+       The sheet's history entry becomes the profile's (replace, not push),
+       so one "back" lands on Today, where the sheet reopens: you left from
+       the sheet, you come back to the sheet. */
+    const into = el.querySelector("a.sheet-plant");
+    if (into) into.addEventListener("click", e => {
+      e.preventDefault();
+      sheetReturn = card.plant.id;
+      activeOverlay = null;
+      document.body.classList.remove("overlay-open");
+      el.remove();
+      location.replace(into.getAttribute("href"));
+    });
     el.querySelectorAll(".deck-act[data-row]").forEach(btn => btn.addEventListener("click", async () => {
       const i = Number(btn.dataset.row);
       if (done.has(i)) return;
@@ -1304,6 +1319,12 @@ async function viewToday() {
       if (card) openSheet(card);
     });
   });
+  // Back from a profile you opened out of its sheet: pick up where you left.
+  if (sheetReturn) {
+    const back = [...byKey.values()].find(c => c.plant && c.plant.id === sheetReturn);
+    sheetReturn = null;
+    if (back) openSheet(back);
+  }
 
   /* Swipes, per card, the reference design's way: drag right and the card
      asks for a photo (which runs a health check); drag left and it sinks to
@@ -4008,6 +4029,10 @@ const routes = [
    and return there. That's Today if you came from a task, the list if you came
    from the list. */
 let backHash = "#/plants";
+// Plant id whose Today sheet should reopen on the next Today render — set
+// when the profile is opened from that sheet, cleared once used or when
+// the person goes anywhere else.
+let sheetReturn = null;
 // Set while a plant is on screen, so the arrow keys have something to drive.
 let plantNavGo = null;
 
@@ -4079,6 +4104,8 @@ async function render() {
   // The outgoing view's photos are about to be replaced — let go of them.
   releaseViewURLs();
   if (!onPlant && !/^#\/edit\//.test(hash)) backHash = hash;
+  // Anywhere but the profile and Today itself: the sheet is not owed a return.
+  if (!onPlant && !/^#\/(today|edit\/)/.test(hash) && hash !== "#/today") sheetReturn = null;
   setTopbarMode(onPlant);
   document.querySelectorAll(".tab").forEach(t =>
     t.classList.toggle("active", t.dataset.tab === route.tab));
