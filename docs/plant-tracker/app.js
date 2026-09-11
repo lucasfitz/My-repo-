@@ -3742,7 +3742,9 @@ async function viewSettings() {
     syncNowBtn.addEventListener("click", async () => {
       toast("Syncing…");
       if (!SYNC.client) await syncConnect();
-      else { await syncFlushOutbox(); await syncPull(); }
+      // Tapped by hand, "Sync now" should leave nothing to doubt: re-read the
+      // whole household rather than trust the cursor.
+      else { await syncFlushOutbox(); await syncPull({ full: true }); }
       toast(SYNC.status === "online" ? "Up to date ✓" : "Sync problem — see status");
       render();
     });
