@@ -394,6 +394,11 @@ function nextDue(plant, kind) {
   if (plant.waterSnooze && plant.waterSnooze > due) {
     due = snapForwardToWaterDay(plant.waterSnooze, every);
   }
+  // "Skip fertilizer until March": the feeding row stays off the list until
+  // then, instead of coming due every fortnight for someone to keep skipping.
+  if (kind === "fertilize" && plant.fertHoldUntil && plant.fertHoldUntil > due) {
+    due = snapForwardToWaterDay(plant.fertHoldUntil, every);
+  }
   return due;
 }
 
@@ -457,6 +462,7 @@ async function logAction(plantId, type, note = "", { date = todayStr(), quiet = 
   if (type === "water" && (!plant.lastWatered || date > plant.lastWatered)) plant.lastWatered = date;
   if (type === "water") delete plant.waterSnooze; // a real watering ends any hold
   if (type === "fertilize" && (!plant.lastFertilized || date > plant.lastFertilized)) plant.lastFertilized = date;
+  if (type === "fertilize") delete plant.fertHoldUntil; // a real feed ends any hold
   await saveRecord("plants", plant);
   await saveRecord("logs", { id: uid(), plantId, type, at, by: state.settings.activeUser, note });
   const verbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned", note: "Noted" };
@@ -881,13 +887,15 @@ async function viewToday() {
        job next to Water — it's how to do the watering. A health step whose
        kind is water or fertilize folds into that care row as a hint when the
        row is on the card; completing the row completes the hint. Without a
-       matching row it stands alone, as before. */
+       matching row it waits for one: "feed at half strength" on a day no
+       feeding is due is not a job, it's a note for the day one is. */
     for (const c of cards) {
       const careOf = kind => c.rows.find(r => r.kind === "care" && r.t.kind === kind);
       c.rows = c.rows.filter(r => {
         if (r.kind !== "task" || !isHealthStep(r.task)) return true;
-        const host = (r.task.kind === "water" || r.task.kind === "fertilize") ? careOf(r.task.kind) : null;
-        if (!host) return true;
+        const rides = r.task.kind === "water" || r.task.kind === "fertilize";
+        const host = rides ? careOf(r.task.kind) : null;
+        if (!host) return !rides;
         (host.hints = host.hints || []).push(r.task);
         return false;
       });
@@ -1221,14 +1229,16 @@ async function viewToday() {
       <div class="sheet" role="dialog" aria-label="${card.plant ? esc(card.plant.name) : "Checklist"}">
         <div class="sheet-grip"></div>
         <div class="sheet-head">
+          ${card.plant ? `<a class="sheet-plant" href="#/plant/${card.plant.id}" aria-label="Open ${esc(card.plant.name)}">` : `<div class="sheet-plant">`}
           ${photo ? `<img class="sheet-thumb" src="${photo}" alt="">`
                   : `<div class="sheet-thumb" style="display:grid;place-items:center">${card.plant ? plantEmoji(card.plant) : "📋"}</div>`}
           <div class="sheet-title">
-            <b>${card.plant ? esc(card.plant.name) : "Anything else"}</b>
+            <b>${card.plant ? esc(card.plant.name) : "Anything else"}${card.plant ? `<span class="sheet-go">›</span>` : ""}</b>
             <span>${card.plant
               ? esc([card.plant.species || (g && g.name), roomLabel(card.room)].filter(Boolean).join(" · "))
               : "Not tied to a plant"}</span>
           </div>
+          ${card.plant ? "</a>" : "</div>"}
           <button class="sheet-close" aria-label="Close">✕</button>
         </div>
         <div class="sheet-body">
@@ -1249,6 +1259,19 @@ async function viewToday() {
     overlayOpened(el, closeAnd);
     el.addEventListener("click", e => { if (e.target === el) closeAnd(); });
     el.querySelector(".sheet-close").addEventListener("click", closeAnd);
+    /* The plant's name is the way into its profile — history, photos, chat.
+       The sheet's history entry becomes the profile's (replace, not push),
+       so one "back" lands on Today, where the sheet reopens: you left from
+       the sheet, you come back to the sheet. */
+    const into = el.querySelector("a.sheet-plant");
+    if (into) into.addEventListener("click", e => {
+      e.preventDefault();
+      sheetReturn = card.plant.id;
+      activeOverlay = null;
+      document.body.classList.remove("overlay-open");
+      el.remove();
+      location.replace(into.getAttribute("href"));
+    });
     el.querySelectorAll(".deck-act[data-row]").forEach(btn => btn.addEventListener("click", async () => {
       const i = Number(btn.dataset.row);
       if (done.has(i)) return;
@@ -1296,6 +1319,12 @@ async function viewToday() {
       if (card) openSheet(card);
     });
   });
+  // Back from a profile you opened out of its sheet: pick up where you left.
+  if (sheetReturn) {
+    const back = [...byKey.values()].find(c => c.plant && c.plant.id === sheetReturn);
+    sheetReturn = null;
+    if (back) openSheet(back);
+  }
 
   /* Swipes, per card, the reference design's way: drag right and the card
      asks for a photo (which runs a health check); drag left and it sinks to
@@ -2319,6 +2348,86 @@ function actionSchedule(action) {
   return { due: addDays(todayStr(), dueIn), repeatDays: repeat };
 }
 
+/* Holds.
+
+   "Skip fertilizer until March, then feed once at half-strength" is not a
+   step: nobody can tick off waiting, and it sat on the Today card for months.
+   A hold is a schedule fact — feeding is off until a date — plus, at most,
+   one real step for the day it ends. The schema asks for hold_until directly;
+   this also reads the phrasing in case the model wrote it as a title. */
+const HOLD_LEAD = /^(?:skip|hold(?: off)?(?: on)?|pause|stop|wait|no|don'?t|do not|avoid|withhold|delay|postpone|defer)\b/i;
+const HOLD_WHEN = /\b(?:until|till|through|before)\s+(?:the\s+)?(?:(early|mid-?|late)\s+)?(?:next\s+)?(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec|spring|summer|autumn|fall|winter)\b(?:\s+(\d{1,2})\b)?/i;
+const MONTH_NAMES = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+const SEASON_MONTH = { spring: 2, summer: 5, autumn: 8, fall: 8, winter: 11 };
+
+function nextDateOf(monthIdx, day) {
+  const y = new Date().getFullYear();
+  const iso = (yr) => new Date(yr, monthIdx, day, 12).toISOString().slice(0, 10);
+  return iso(y) > todayStr() ? iso(y) : iso(y + 1);
+}
+
+function parseHoldTitle(title, kind) {
+  if (!HOLD_LEAD.test(title)) return null;
+  const m = HOLD_WHEN.exec(title);
+  if (!m) return null;
+  const [, part, word, dayStr] = m;
+  const w = word.toLowerCase();
+  let monthIdx, day = dayStr ? Math.min(28, +dayStr) : 1;
+  if (w in SEASON_MONTH) {
+    monthIdx = SEASON_MONTH[w] + (/^late/.test(part || "") ? 2 : /^mid/.test(part || "") ? 1 : 0);
+    if (!dayStr && /^mid/.test(part || "")) day = 15;
+  } else {
+    monthIdx = MONTH_NAMES.findIndex(n => n.startsWith(w.slice(0, 3)));
+    if (!dayStr) day = /^late/.test(part || "") ? 25 : /^mid/.test(part || "") ? 15 : 1;
+  }
+  if (monthIdx < 0) return null;
+  const until = nextDateOf(monthIdx % 12, day);
+  const routine = /fertili[sz]|feed|food|nutrient/i.test(title) ? "fertilize"
+    : /\bwater/i.test(title) ? "water"
+    : (kind === "water" || kind === "fertilize") ? kind : null;
+  const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+  const thenM = /(?:,|;|\s)\s*(?:and\s+)?then\s+(.+?)\.?$/i.exec(title);
+  let then = thenM ? cap(thenM[1].trim()) : null;
+  if (!then && !routine) {
+    // "Hold off repotting until late spring": the step, when its day comes,
+    // is to go ahead. Phrase it so it reads right on that day, not today.
+    const mid = /^(?:hold off(?: on)?|skip|postpone|delay|defer|wait(?: on)?|avoid)\s+(.+?)\s+(?:until|till|through|before)\b/i.exec(title);
+    then = mid ? "Go ahead with " + mid[1].trim() : "Go ahead: " + title;
+  }
+  return { until, kind: routine, then };
+}
+
+function stepHold(action) {
+  if (!action) return null;
+  const hu = action.hold_until;
+  if (hu && /^\d{4}-\d{2}-\d{2}$/.test(hu) && hu > todayStr()) {
+    const kind = (action.kind === "water" || action.kind === "fertilize") ? action.kind : null;
+    return { until: hu, kind, then: action.title };
+  }
+  return parseHoldTitle(action.title || "", action.kind);
+}
+
+/* Put an assessment step where it belongs: a hold onto the plant's
+   schedule (with a note in its history), a doable step onto the checklist
+   due on its day. Returns "held" when there was nothing to tick off. */
+async function placeStep(plant, action, taskId, opts = {}) {
+  const hold = stepHold(action);
+  if (!hold) { await addStepAsTask(plant, action, taskId, opts); return "added"; }
+  if (hold.kind) {
+    const field = hold.kind === "fertilize" ? "fertHoldUntil" : "waterSnooze";
+    if (!plant[field] || plant[field] < hold.until) plant[field] = hold.until;
+    await saveRecord("plants", plant);
+    await saveRecord("logs", {
+      id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: "Sprout AI",
+      note: `${hold.kind === "fertilize" ? "Feeding" : "Watering"} on hold until ${fmtDate(hold.until)}`,
+    });
+  }
+  if (!hold.then) return "held";
+  const dueIn = Math.max(0, Math.round((Date.parse(hold.until) - Date.parse(todayStr())) / DAY));
+  await addStepAsTask(plant, { ...action, title: hold.then, due_in_days: dueIn, repeat_every_days: 0 }, taskId, opts);
+  return "added";
+}
+
 async function addStepAsTask(plant, action, taskId, { source = "health" } = {}) {
   await saveRecord("tasks", {
     id: taskId,
@@ -2393,7 +2502,7 @@ async function materializeHealthTasks(plant) {
       if (!key || seen.has(key)) continue;
       seen.add(key);
       const id = actionTaskId(plant.id, h.at, i);
-      if (!(await dbGet("tasks", id))) await addStepAsTask(plant, a, id, { source: "health" });
+      if (!(await dbGet("tasks", id))) await placeStep(plant, a, id, { source: "health" });
       placed++;
     }
   }
@@ -2696,10 +2805,10 @@ function wireSteps(box, plant) {
   box.querySelectorAll("[data-add]").forEach(btn => {
     btn.addEventListener("click", async () => {
       const i = Number(btn.dataset.add);
-      await addStepAsTask(plant, actions[i], actionTaskId(plant.id, at, i));
+      const placed = await placeStep(plant, actions[i], actionTaskId(plant.id, at, i));
       btn.disabled = true;
-      btn.textContent = "On the list ✓";
-      toast("Added to the checklist");
+      btn.textContent = placed === "held" ? "Hold noted ✓" : "On the list ✓";
+      toast(placed === "held" ? "Hold noted — nothing to tick off" : "Added to the checklist");
     });
   });
 
@@ -2717,9 +2826,9 @@ function wireSteps(box, plant) {
     for (let i = 0; i < actions.length; i++) {
       const btn = box.querySelector(`[data-add="${i}"]`);
       if (!btn || btn.disabled) continue;
-      await addStepAsTask(plant, actions[i], actionTaskId(plant.id, at, i));
+      const placed = await placeStep(plant, actions[i], actionTaskId(plant.id, at, i));
       btn.disabled = true;
-      btn.textContent = "On the list ✓";
+      btn.textContent = placed === "held" ? "Hold noted ✓" : "On the list ✓";
       n++;
     }
     toast(n ? `Added ${n} step${n > 1 ? "s" : ""} to the checklist` : "Already on the list");
@@ -3920,6 +4029,10 @@ const routes = [
    and return there. That's Today if you came from a task, the list if you came
    from the list. */
 let backHash = "#/plants";
+// Plant id whose Today sheet should reopen on the next Today render — set
+// when the profile is opened from that sheet, cleared once used or when
+// the person goes anywhere else.
+let sheetReturn = null;
 // Set while a plant is on screen, so the arrow keys have something to drive.
 let plantNavGo = null;
 
@@ -3991,6 +4104,8 @@ async function render() {
   // The outgoing view's photos are about to be replaced — let go of them.
   releaseViewURLs();
   if (!onPlant && !/^#\/edit\//.test(hash)) backHash = hash;
+  // Anywhere but the profile and Today itself: the sheet is not owed a return.
+  if (!onPlant && !/^#\/(today|edit\/)/.test(hash) && hash !== "#/today") sheetReturn = null;
   setTopbarMode(onPlant);
   document.querySelectorAll(".tab").forEach(t =>
     t.classList.toggle("active", t.dataset.tab === route.tab));
@@ -4103,6 +4218,25 @@ async function render() {
       fixed++;
     }
     if (fixed) { console.log(`Sprout: resolved ${fixed} orphaned task(s)`); render(); }
+  })().catch(() => {});
+
+  /* Steps that were really holds — "skip fertilizer until March, then feed
+     once" — from assessments made before the app understood holds. Each is
+     re-placed the way a new assessment's would be: the hold goes onto the
+     plant, the "then" clause becomes the step for the day it ends, under the
+     same task id so two phones doing this converge on one row. */
+  (async () => {
+    const plants = new Map((await dbAll("plants")).map(p => [p.id, p]));
+    let fixed = 0;
+    for (const t of await dbAll("tasks")) {
+      if (t.done || !t.plantId || !isHealthStep(t) || !parseHoldTitle(t.title || "", t.kind)) continue;
+      const plant = plants.get(t.plantId);
+      if (!plant) continue;
+      await removeRecord("tasks", t.id);
+      await placeStep(plant, { title: t.title, detail: t.detail || "", kind: t.kind || "", hold_until: "" }, t.id, { source: t.source || "health" });
+      fixed++;
+    }
+    if (fixed) { console.log(`Sprout: turned ${fixed} waiting step(s) into holds`); render(); }
   })().catch(() => {});
 
   if (syncConfigured()) syncConnect().catch(() => {});

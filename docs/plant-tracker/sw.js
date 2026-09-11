@@ -1,5 +1,5 @@
 // Sprout service worker — offline-first app shell cache.
-const VERSION = "sprout-v53";
+const VERSION = "sprout-v55";
 const CACHE = VERSION;
 const ASSETS = [
   "./",
