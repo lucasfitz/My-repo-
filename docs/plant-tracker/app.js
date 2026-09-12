@@ -679,31 +679,47 @@ function gardenHealth(plants) {
   const live = plants.filter(p => !p.archived);
   if (!scored.length) return { scored: 0, total: live.length, avg: null };
   const avg = scored.reduce((s, p) => s + p.health.score, 0) / scored.length;
-  const band = avg >= 8 ? "Thriving" : avg >= 6.5 ? "Healthy" : avg >= 5 ? "Fair" : "Needs attention";
-  return { scored: scored.length, total: live.length, avg, band, ailing: scored.filter(p => p.health.score <= 5).length };
+  return { scored: scored.length, total: live.length, avg, band: healthBand(avg), ailing: scored.filter(p => p.health.score <= 5).length };
 }
 
-/* Average health per day, from the health checks actually recorded.
+/* The collection's health, day by day.
 
-   Every check writes a log with a score, so the history is already there. A
-   day's value is the mean of the checks made that day — not of every plant,
-   since most plants aren't checked on most days, and carrying forward stale
-   scores would draw a confident line through data that doesn't exist. */
-function healthSeries(logs, days = 90) {
-  const cutoff = addDays(todayStr(), -days);
-  const byDay = new Map();
-  for (const l of logs) {
-    if (l.type !== "ai" || typeof l.score !== "number") continue;
-    const day = l.at.slice(0, 10);
-    if (day < cutoff) continue;
-    const at = byDay.get(day) || [];
-    at.push(l.score);
-    byDay.set(day, at);
+   Every check writes a log with a score, so the history is already there.
+   The headline figure is the average of each plant's LATEST score, so the
+   line has to mean the same thing on every day it passes through: each
+   plant's most recent score as of that day, averaged over the plants that
+   had one. That is a carried value between checks — which is exactly what
+   the headline is too, on any day nobody ran a check — and each point says
+   how many plants it rests on, so a thumb parked on an early date can read
+   "1 of 6 checked" rather than take a lone score for the whole garden.
+   Days with a check are flagged, so the chart can mark where the line was
+   actually measured. days = 0 means the whole history. */
+function healthTimeline(plants, logs, days = 90) {
+  const live = new Set(plants.filter(p => !p.archived).map(p => p.id));
+  const checks = logs
+    .filter(l => l.type === "ai" && typeof l.score === "number" && live.has(l.plantId))
+    .sort((a, b) => a.at.localeCompare(b.at));
+  if (!checks.length) return [];
+  const today = todayStr();
+  const first = checks[0].at.slice(0, 10);
+  const start = days ? (addDays(today, -days) > first ? addDays(today, -days) : first) : first;
+  const latest = new Map();
+  let i = 0;
+  for (; i < checks.length && checks[i].at.slice(0, 10) < start; i++) latest.set(checks[i].plantId, checks[i].score);
+  const out = [];
+  for (let d = start; d <= today; d = addDays(d, 1)) {
+    let checked = 0;
+    for (; i < checks.length && checks[i].at.slice(0, 10) === d; i++) { latest.set(checks[i].plantId, checks[i].score); checked++; }
+    if (!latest.size) continue;
+    const vals = [...latest.values()];
+    out.push({ date: d, avg: vals.reduce((a, n) => a + n, 0) / vals.length, n: latest.size, checked });
   }
-  return [...byDay.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([date, scores]) => ({ date, avg: scores.reduce((s, n) => s + n, 0) / scores.length }));
+  return out;
 }
+const healthBand = avg => avg >= 8 ? "Thriving" : avg >= 6.5 ? "Healthy" : avg >= 5 ? "Fair" : "Needs attention";
+// Per-plant colour follows the chip (8+ good); the garden's follows its bands.
+const healthTone = avg => avg >= 8 ? "good" : avg >= 5 ? "fair" : "poor";
+const gardenTone = avg => avg >= 6.5 ? "good" : avg >= 5 ? "fair" : "poor";
 
 /* A sparkline, drawn only when there is something to draw.
 
@@ -724,6 +740,135 @@ function healthSparkline(series) {
       <polyline class="spark-line" points="${pts.join(" ")}"></polyline>
       <circle class="spark-dot" cx="${x(series.length - 1).toFixed(1)}" cy="${y(last.avg).toFixed(1)}" r="2.8"></circle>
     </svg>`;
+}
+
+/* The garden score, opened up: the whole line, and a thumb to read it.
+
+   The card on Today gives one number. Tapping it gives the number on any
+   day: drag across the chart and the figure, its band, the date and the
+   per-plant scores follow the thumb, with a tick each time it lands on a
+   new day. Dots mark the days a check was actually made; between them the
+   line carries each plant's last score, as the headline does. */
+async function openHealthSheet(plants, logs) {
+  const prior = document.getElementById("healthSheet");
+  if (prior) { overlayClosed(prior); prior.remove(); }
+  const live = plants.filter(p => !p.archived).sort((a, b) => a.name.localeCompare(b.name));
+  // Each plant's checks in order, for the per-plant readout at any date.
+  const perPlant = new Map(live.map(p => [p.id, logs
+    .filter(l => l.plantId === p.id && l.type === "ai" && typeof l.score === "number")
+    .map(l => ({ date: l.at.slice(0, 10), score: l.score }))
+    .sort((a, b) => a.date.localeCompare(b.date))]));
+  let range = 90, series = healthTimeline(plants, logs, range), idx = series.length - 1;
+
+  const el = document.createElement("div");
+  el.id = "healthSheet";
+  el.className = "sheet-back";
+  el.innerHTML = `
+    <div class="sheet" role="dialog" aria-label="Garden health">
+      <div class="sheet-grip"></div>
+      <div class="sheet-head">
+        <div class="sheet-title">
+          <b>Garden health</b>
+          <span>Every checked plant's latest score, averaged</span>
+        </div>
+        <button class="sheet-close" aria-label="Close">✕</button>
+      </div>
+      <div class="sheet-body">
+        <div class="hx-figure">
+          <div class="hx-score" id="hxScore">—</div>
+          <div class="hx-meta"><b id="hxBand"></b><span id="hxWhen"></span></div>
+        </div>
+        <div class="hx-chart" id="hxChart"></div>
+        <div class="hx-axis"><span id="hxFrom"></span><span id="hxTo"></span></div>
+        <div class="pill-row hx-range">
+          ${[[30, "30 days"], [90, "90 days"], [365, "Year"], [0, "All"]].map(([d, l]) =>
+            `<button class="pill ${d === range ? "active" : ""}" data-range="${d}" type="button">${l}</button>`).join("")}
+        </div>
+        <div class="hx-plants" id="hxPlants"></div>
+      </div>
+    </div>`;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("open"));
+  const $ = id => el.querySelector("#" + id);
+
+  const W = 320, H = 150, PAD = 6;
+  const x = i => PAD + (series.length > 1 ? (i / (series.length - 1)) * (W - PAD * 2) : (W - PAD * 2) / 2);
+  const y = v => PAD + (1 - v / 10) * (H - PAD * 2);
+  const drawChart = () => {
+    if (!series.length) {
+      $("hxChart").innerHTML = `<p class="subtitle hx-empty">No health checks yet. Add a photo to a plant — a check runs on its own.</p>`;
+      return;
+    }
+    const pts = series.map((d, i) => `${x(i).toFixed(1)},${y(d.avg).toFixed(1)}`);
+    $("hxChart").innerHTML = `
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+        ${[2.5, 5, 7.5].map(v => `<line class="hx-grid" x1="0" x2="${W}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"></line>`).join("")}
+        <polygon class="spark-fill" points="${x(0).toFixed(1)},${H - PAD} ${pts.join(" ")} ${x(series.length - 1).toFixed(1)},${H - PAD}"></polygon>
+        <polyline class="spark-line" points="${pts.join(" ")}"></polyline>
+        ${series.map((d, i) => d.checked ? `<circle class="hx-check" cx="${x(i).toFixed(1)}" cy="${y(d.avg).toFixed(1)}" r="3"></circle>` : "").join("")}
+        <line class="hx-guide" id="hxGuide" y1="0" y2="${H}"></line>
+        <circle class="hx-dot" id="hxDot" r="5"></circle>
+      </svg>`;
+    $("hxFrom").textContent = fmtDate(series[0].date);
+    $("hxTo").textContent = series.length > 1 ? fmtDate(series[series.length - 1].date) : "";
+  };
+  const showPoint = () => {
+    const d = series[idx];
+    const total = live.length;
+    if (!d) {
+      $("hxScore").textContent = "—"; $("hxScore").className = "hx-score";
+      $("hxBand").textContent = "Not checked yet"; $("hxWhen").textContent = "";
+    } else {
+      $("hxScore").textContent = d.avg.toFixed(1);
+      $("hxScore").className = "hx-score " + gardenTone(d.avg);
+      $("hxBand").textContent = healthBand(d.avg);
+      $("hxWhen").textContent = `${d.date === todayStr() ? "Today" : fmtDate(d.date)} · ${d.n} of ${total} checked`;
+      const g = $("hxGuide"), dot = $("hxDot");
+      if (g) { g.setAttribute("x1", x(idx).toFixed(1)); g.setAttribute("x2", x(idx).toFixed(1)); }
+      if (dot) { dot.setAttribute("cx", x(idx).toFixed(1)); dot.setAttribute("cy", y(d.avg).toFixed(1)); }
+    }
+    const at = d ? d.date : todayStr();
+    $("hxPlants").innerHTML = live.map(p => {
+      const hist = perPlant.get(p.id).filter(h => h.date <= at);
+      const cur = hist[hist.length - 1], prev = hist[hist.length - 2];
+      const arrow = cur && prev ? (cur.score > prev.score ? "↗" : cur.score < prev.score ? "↘" : "→") : "";
+      return `<div class="hx-row">
+        <span class="hx-name">${esc(p.name)}</span>
+        ${cur ? `<span class="hx-val ${healthTone(cur.score)}">${cur.score}/10 <small>${arrow}</small></span>`
+              : `<span class="hx-val none">not yet checked</span>`}
+      </div>`;
+    }).join("");
+  };
+  drawChart(); showPoint();
+
+  // The thumb. Vertical scroll stays with the sheet body; a touch on the
+  // chart itself is a scrub, so touch-action: none lives on the chart.
+  const chart = $("hxChart");
+  let scrubbing = false;
+  const scrubTo = clientX => {
+    if (!series.length) return;
+    const r = chart.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    const next = Math.round(f * (series.length - 1));
+    if (next === idx) return;
+    idx = next; buzz(3); showPoint();
+  };
+  chart.addEventListener("pointerdown", e => { scrubbing = true; chart.setPointerCapture?.(e.pointerId); scrubTo(e.clientX); });
+  chart.addEventListener("pointermove", e => { if (scrubbing || e.buttons) scrubTo(e.clientX); });
+  const lift = () => { scrubbing = false; };
+  chart.addEventListener("pointerup", lift); chart.addEventListener("pointercancel", lift);
+
+  el.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => {
+    range = Number(b.dataset.range);
+    el.querySelectorAll("[data-range]").forEach(o => o.classList.toggle("active", o === b));
+    series = healthTimeline(plants, logs, range); idx = series.length - 1;
+    drawChart(); showPoint();
+  }));
+
+  const closeAnd = () => { el.remove(); overlayClosed(el); };
+  overlayOpened(el, closeAnd);
+  el.addEventListener("click", e => { if (e.target === el) closeAnd(); });
+  el.querySelector(".sheet-close").addEventListener("click", closeAnd);
 }
 
 async function viewToday() {
@@ -753,7 +898,7 @@ async function viewToday() {
 
   const gh = gardenHealth(plants);
   const allLogs = await dbAll("logs");
-  const series = healthSeries(allLogs);
+  const series = healthTimeline(plants, allLogs, 90);
   const spark = healthSparkline(series);
 
   let html = `
@@ -1037,13 +1182,14 @@ async function viewToday() {
      above the deck pushes the card itself below the fold. */
   if (gh.total) {
     html += `
-      <div class="card flat garden-card">
+      <div class="card flat garden-card${gh.avg === null ? "" : " is-tappable"}" ${gh.avg === null ? "" : `role="button" tabindex="0" aria-label="Garden health over time"`}>
         <div class="garden-main">
           <div class="garden-figure">
             <div class="garden-score">${gh.avg === null ? "—" : gh.avg.toFixed(1)}</div>
             <div class="garden-band">${gh.avg === null ? "Not checked yet" : esc(gh.band)}</div>
           </div>
           ${spark || ""}
+          ${gh.avg === null ? "" : `<span class="garden-go">›</span>`}
         </div>
         <div class="garden-stats">
           <span><b>${gh.total}</b> plant${gh.total === 1 ? "" : "s"}</span>
@@ -1114,6 +1260,12 @@ async function viewToday() {
       </details>` : ""}`;
 
   $view().innerHTML = html;
+  const gardenCard = $view().querySelector(".garden-card.is-tappable");
+  if (gardenCard) {
+    const open = () => openHealthSheet(plants, allLogs);
+    gardenCard.addEventListener("click", open);
+    gardenCard.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+  }
 
   /* The deck. Everything re-renders after a record changes; a card with
      nothing left on it simply isn't in the next deal, and render() keeps the
