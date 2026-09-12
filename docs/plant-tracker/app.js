@@ -754,10 +754,13 @@ async function openHealthSheet(plants, logs) {
   if (prior) { overlayClosed(prior); prior.remove(); }
   const live = plants.filter(p => !p.archived).sort((a, b) => a.name.localeCompare(b.name));
   // Each plant's checks in order, for the per-plant readout at any date.
+  // Ordered by the full timestamp: two checks on one day (a poor one, then
+  // a better one after the fix) used to sort by calendar day alone, which
+  // left the tie to the store's id order and could show the earlier score.
   const perPlant = new Map(live.map(p => [p.id, logs
     .filter(l => l.plantId === p.id && l.type === "ai" && typeof l.score === "number")
-    .map(l => ({ date: l.at.slice(0, 10), score: l.score }))
-    .sort((a, b) => a.date.localeCompare(b.date))]));
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .map(l => ({ date: l.at.slice(0, 10), score: l.score }))]));
   let range = 90, series = healthTimeline(plants, logs, range), idx = series.length - 1;
 
   const el = document.createElement("div");
