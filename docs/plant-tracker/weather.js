@@ -64,6 +64,14 @@ async function getWeather(force = false) {
   if (fresh && !force) return _wx.data;
   if (!navigator.onLine && _wx) return _wx.data;
 
+  // One fetch at a time: two renders a second apart should share it, not
+  // race each other to the cache.
+  if (_wxInflight) return _wxInflight;
+  _wxInflight = fetchWeather(now).finally(() => { _wxInflight = null; });
+  return _wxInflight;
+}
+let _wxInflight = null;
+async function fetchWeather(now) {
   const w = state.settings.weather;
   const url = "https://api.open-meteo.com/v1/forecast" +
     `?latitude=${w.lat}&longitude=${w.lon}` +
