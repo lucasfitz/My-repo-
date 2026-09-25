@@ -60,7 +60,15 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 // Synced mutations: write locally, stamp updatedAt, queue for cloud push.
 // (queuePush/queueDelete are no-ops until sync is configured — see sync.js.)
 async function saveRecord(store, rec) {
-  rec.updatedAt = new Date().toISOString();
+  /* Never stamp a record older than it already is. Two phones keep their
+     own clocks; if the other one runs a little ahead, a watering logged here
+     would carry an OLDER stamp than the copy it replaces — the other phone
+     would ignore it, and this phone's next pull would put the stale copy
+     back, so the card you just cleared returned. A stamp one tick past the
+     previous one is always the newest thing either phone has seen. */
+  let at = new Date().toISOString();
+  if (rec.updatedAt && rec.updatedAt >= at) at = new Date(Date.parse(rec.updatedAt) + 1).toISOString();
+  rec.updatedAt = at;
   await dbPut(store, rec);
   await queuePush(store, rec.id);
   return rec;
@@ -874,7 +882,7 @@ async function openHealthSheet(plants, logs) {
   el.querySelector(".sheet-close").addEventListener("click", closeAnd);
 }
 
-async function viewToday() {
+async function viewToday(seq = renderSeq) {
   const plants = await dbAll("plants");
   const hasOutdoor = plants.some(p => !p.archived && isOutdoorPlant(p));
   const wx = hasOutdoor ? await getWeather() : null;
@@ -1262,6 +1270,10 @@ async function viewToday() {
         </div>
       </details>` : ""}`;
 
+  // Everything above was read before the weather came back; if a newer
+  // render started meanwhile (a watering logged, a row synced), it has
+  // fresher data — leave the screen to it.
+  if (seq !== renderSeq) return;
   $view().innerHTML = html;
   const gardenCard = $view().querySelector(".garden-card.is-tappable");
   if (gardenCard) {
@@ -4168,7 +4180,7 @@ async function checkAndNotify(force = false) {
 // Router
 // ---------------------------------------------------------------------------
 const routes = [
-  { re: /^#\/today$/, fn: () => viewToday(), tab: "today" },
+  { re: /^#\/today$/, fn: (m, seq) => viewToday(seq), tab: "today" },
   { re: /^#\/plants$/, fn: () => viewPlants(), tab: "plants" },
   { re: /^#\/add$/, fn: () => viewAddEdit(), tab: "add" },
   { re: /^#\/edit\/(.+)$/, fn: m => viewAddEdit(m[1]), tab: "plants" },
@@ -4244,7 +4256,13 @@ let renderedHash = null;
 const SCROLL_MEMORY = new Map();
 const remembersScroll = h => /^#\/(today|plants|guide|settings)$/.test(h);
 
+/* Renders can overlap: Today waits on the weather, and a second render can
+   start (a tap, a synced row) before the first has committed. The last one
+   asked for must be the last one on screen, so a render that has been
+   superseded stops before it writes. Views with a slow await check this. */
+let renderSeq = 0;
 async function render() {
+  const seq = ++renderSeq;
   const hash = location.hash || "#/today";
   const sameScreen = hash === renderedHash;
   if (!sameScreen && renderedHash && remembersScroll(renderedHash)) {
@@ -4265,7 +4283,8 @@ async function render() {
   document.querySelectorAll(".tab").forEach(t =>
     t.classList.toggle("active", t.dataset.tab === route.tab));
   try {
-    await route.fn(m);
+    await route.fn(m, seq);
+    if (seq !== renderSeq) return; // a newer render owns the screen now
   } catch (err) {
     $view().innerHTML = `<div class="empty"><div class="big">·</div><p>Something went wrong.<br>${esc(err.message)}</p></div>`;
   }
