@@ -78,6 +78,22 @@ async function removeRecord(store, id) {
   await queueDelete(store, id);
 }
 
+/* Write a plant through the current record, not a copy held across a wait.
+
+   A health check loads the plant, spends ten seconds with the API, then
+   saves. Water the plant in those ten seconds and the save puts the old
+   watering back — stamped newer, so it wins on the other phone too, and the
+   card you just cleared returns. Same for a Today render stalled on the
+   weather that then materializes steps. Anything that waited before saving
+   applies its change to a fresh read instead. */
+async function updatePlant(plantId, mutate) {
+  const fresh = await dbGet("plants", plantId);
+  if (!fresh) return null;
+  await mutate(fresh);
+  await saveRecord("plants", fresh);
+  return fresh;
+}
+
 // ---------------------------------------------------------------------------
 // Settings / household profiles
 // ---------------------------------------------------------------------------
@@ -2467,6 +2483,13 @@ async function viewAddEdit(editId = null) {
     if (typed && typed === confirmedName.trim()) { /* keep sKey as-is */ }
     else if (exact) sKey.value = exact.key;
     else sKey.value = "other";
+    if (editing) {
+      // The form was filled from a copy loaded when it opened; anything that
+      // changed since (a watering from the other phone, a health check that
+      // finished) must not be undone by saving that copy over it.
+      const fresh = await dbGet("plants", plant.id);
+      if (fresh) Object.assign(plant, fresh);
+    }
     plant.speciesKey = sKey.value;
     plant.species = typed || guideEntry(sKey.value).name;
     plant.quantity = Math.max(1, parseInt(document.getElementById("pQuantity").value, 10) || 1);
@@ -2582,8 +2605,9 @@ async function placeStep(plant, action, taskId, opts = {}) {
   if (!hold) { await addStepAsTask(plant, action, taskId, opts); return "added"; }
   if (hold.kind) {
     const field = hold.kind === "fertilize" ? "fertHoldUntil" : "waterSnooze";
-    if (!plant[field] || plant[field] < hold.until) plant[field] = hold.until;
-    await saveRecord("plants", plant);
+    const later = p => { if (!p[field] || p[field] < hold.until) p[field] = hold.until; };
+    later(plant); // the caller's copy stays in step…
+    await updatePlant(plant.id, later); // …but the record is written fresh
     await saveRecord("logs", {
       id: uid(), plantId: plant.id, type: "note", at: new Date().toISOString(), by: "Sprout AI",
       note: `${hold.kind === "fertilize" ? "Feeding" : "Watering"} on hold until ${fmtDate(hold.until)}`,
@@ -2651,6 +2675,8 @@ function healthStepPrefix(plantId, at) {
    untouched. Duplicate titles within one assessment collapse, and no
    assessment puts more than five steps on a card. */
 async function materializeHealthTasks(plant) {
+  // The caller's copy may predate a watering logged while it waited.
+  plant = (await dbGet("plants", plant.id)) || plant;
   const h = plant.health;
   if (!h || !Array.isArray(h.actions) || h.tasked) return;
   h.tasked = true;
@@ -2673,7 +2699,9 @@ async function materializeHealthTasks(plant) {
       placed++;
     }
   }
-  await saveRecord("plants", plant);
+  // Only the flag is ours to write. Anything else on the record — a watering
+  // logged while the steps were being placed — belongs to whoever wrote it.
+  await updatePlant(plant.id, p => { if (p.health && p.health.at === h.at) p.health.tasked = true; });
 }
 
 /* Apply what the chat decided, and say what happened in words.
@@ -2767,6 +2795,7 @@ async function applyChatChanges(plantId, res) {
 }
 
 async function applyStepToPlan(plant, action) {
+  plant = (await dbGet("plants", plant.id)) || plant;
   const changes = [];
   if (action.water_every_days > 0 && action.water_every_days !== plant.waterEvery) {
     changes.push(`water every ${plant.waterEvery || "—"}d → ${action.water_every_days}d`);
