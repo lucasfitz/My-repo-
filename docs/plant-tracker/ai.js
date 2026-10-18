@@ -340,17 +340,20 @@ ${openSteps.length ? openSteps.map(t => `- ${t.title}${t.repeatDays ? ` (every $
   });
   // ...and on the plant itself, so its health and the steps it needs survive
   // leaving the screen, and show up on both phones.
-  plant.health = {
+  const health = {
     score: result.health_score, status: result.status, trend: result.trend,
     summary: result.summary, observations: result.observations,
     issues: result.issues, actions: result.actions, at,
   };
-  await saveRecord("plants", plant);
+  // Through the current record, not the copy read before the API call: a
+  // watering logged while the check ran must survive it.
+  const current = (await updatePlant(plantId, p => { p.health = health; })) || plant;
+  plant.health = health;
   // The steps land on the checklist by themselves, each due on its day. A
   // recommendation nobody has to transcribe is the only kind that reliably
   // happens — the report on the plant page keeps the reasoning.
-  await materializeHealthTasks(plant);
-  return plant.health;
+  await materializeHealthTasks(current);
+  return health;
 }
 
 /* Every new photo is a fresh look at the plant, so it triggers a check on its
