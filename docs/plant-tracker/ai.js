@@ -818,11 +818,17 @@ function chatSchema() {
       drop_task_ids: {
         type: "array", items: { type: "string" },
         description: "Open task ids the owner wants gone — wrong, unwanted, or no longer relevant"
+      },
+      run_health_check: {
+        type: "boolean",
+        description: "True when the owner asks you to check, re-check or reassess the plant, or to judge its " +
+          "progress properly. A full health check then runs on the photos on file right after your reply and " +
+          "its result is posted into this chat — so say you're running it, and never invent a result yourself."
       }
     },
     required: ["reply", "set_name", "set_room", "set_species_key", "set_species_name",
       "set_water_every_days", "set_fert_every_days", "set_last_watered", "set_last_fertilized",
-      "set_outdoor", "set_notes", "clear_health", "add_tasks", "complete_task_ids", "drop_task_ids"],
+      "set_outdoor", "set_notes", "clear_health", "add_tasks", "complete_task_ids", "drop_task_ids", "run_health_check"],
     additionalProperties: false
   };
 }
@@ -837,8 +843,27 @@ async function aiPlantChat(plantId, transcript) {
   const openTasks = (await dbAll("tasks")).filter(t => t.plantId === plantId && !t.done);
   const env = await describeEnvironment(plant);
 
+  /* The chat sees what the owner sees. "Is there more growth than last
+     week?" is a question about the photos, and it used to be answered from
+     the written notes alone — which is no answer. The three newest photos
+     ride the first turn, dated, oldest first, so the comparison is real. */
+  const allPhotos = (await dbAllByIndex("photos", "plantId", plantId))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const shown = allPhotos.filter(ph => ph.blob).slice(-3);
+  const photoBlocks = [];
+  for (const ph of shown) {
+    let data;
+    try { data = await blobToApiImage(ph.blob); } catch { continue; }
+    photoBlocks.push({ type: "text", text: `Photo taken ${ph.createdAt.slice(0, 10)}:` });
+    photoBlocks.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data } });
+  }
+  const checks = logs.filter(l => l.type === "ai" && typeof l.score === "number")
+    .sort((a, b) => a.at.localeCompare(b.at));
+
   const h = plant.health;
   const system = `You are Sprout's plant assistant, talking with the owner about one specific plant. You can edit the plant's record directly through the structured fields — that is the point of this chat: when an identification, schedule, or health check got something wrong, the owner tells you here and you fix it. Edit only what the owner asks for or plainly implies; when you're unsure what they mean, ask instead of guessing. Keep replies short and warm, like a knowledgeable friend texting back.
+
+You can see the plant: its newest photos are attached to the conversation, each dated, so compare them directly when asked about growth, colour or change — never say you only have notes. You can also run a full health check (run_health_check): do that when the owner asks you to check or re-check the plant, or wants a proper verdict on its progress; its result lands in this chat on its own.
 
 Today: ${todayStr()}.
 The plant's record:
@@ -848,15 +873,22 @@ The plant's record:
 - ${env}
 - Owner's notes: ${plant.notes || "(none)"}
 - Last health check: ${h ? `${h.at.slice(0, 10)} — ${h.score}/10 ${h.status}: ${h.summary}` : "(none)"}
+- Health checks so far: ${checks.length ? checks.map(c => `${c.at.slice(0, 10)} ${c.score}/10 ${c.status}`).join("; ") : "(none)"}
+- Photos on file: ${allPhotos.length ? allPhotos.map(ph => ph.createdAt.slice(0, 10)).join(", ") + (shown.length ? ` (the ${shown.length} newest are attached)` : "") : "(none)"}
 - Open checklist steps for this plant:
 ${openTasks.map(t => `  · [id ${t.id}] ${t.title}${t.repeatDays ? ` (repeats every ${t.repeatDays}d)` : ""}${t.due ? ` (for ${t.due})` : ""}`).join("\n") || "  (none)"}
 - Recent care history:
 ${describeCareHistory(logs) || "  (none recorded)"}
 - Guide entry says: ${g.light}. ${g.tips}`;
 
+  const messages = transcript.map(m => ({ role: m.role, content: m.text }));
+  const firstUser = messages.findIndex(m => m.role === "user");
+  if (photoBlocks.length && firstUser !== -1) {
+    messages[firstUser] = { role: "user", content: [...photoBlocks, { type: "text", text: messages[firstUser].content }] };
+  }
   return askClaude({
     system,
-    messages: transcript.map(m => ({ role: m.role, content: m.text })),
+    messages,
     schema: chatSchema(),
     effort: "low",
     maxTokens: 6000,
