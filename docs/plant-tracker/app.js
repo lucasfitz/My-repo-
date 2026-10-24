@@ -2981,6 +2981,26 @@ function openPlantChat(plantId, plantName) {
         ? `<div class="msg-changes">${applied.map(c => `<span class="msg-change">✓ ${esc(c)}</span>`).join("")}</div>`
         : ""));
       if (applied.length) { buzz(8); render(); }
+      /* "Check again": the chat asked for a real assessment. It runs on the
+         photos on file and its result is posted here, and into the
+         transcript, so the next turn can talk about what it found. */
+      if (res.run_health_check) {
+        const running = bubble("ai thinking", "Running a health check on the photos…");
+        try {
+          const h = await aiAssessPlant(plantId);
+          running.remove();
+          const steps = (h.actions || []).slice(0, 3).map(a => a.title);
+          const summary = `Health check: ${h.score}/10 ${h.status}${h.trend && h.trend !== "unknown" ? ", " + h.trend : ""} — ${h.summary}` +
+            (steps.length ? ` Steps: ${steps.join("; ")}.` : "");
+          transcript.push({ role: "assistant", text: summary });
+          bubble("ai", `${healthChip(h, { withLabel: true })} <b>${esc(h.trend && h.trend !== "unknown" ? h.trend : "")}</b><div style="margin-top:6px">${esc(h.summary)}</div>` +
+            (steps.length ? `<div class="msg-changes">${steps.map(t => `<span class="msg-change">→ ${esc(t)}</span>`).join("")}</div>` : ""));
+          buzz(8); render();
+        } catch (err) {
+          running.remove();
+          bubble("ai", `⚠️ Couldn't run the check: ${esc(err.message)}`);
+        }
+      }
     } catch (err) {
       wait.remove();
       bubble("ai", `⚠️ ${esc(err.message)}`);
