@@ -32,7 +32,9 @@ const wxThresholds = () => weatherUnit() === "fahrenheit"
   ? { hot: 90, frost: 36 }
   : { hot: 32, frost: 2 };
 
-const WX_RAIN_MM = 4;        // today's rain that likely covers a watering
+// Rain that counts as a watering for an uncovered outdoor plant: a soaking,
+// not a shower. 6 mm is about a quarter inch — enough to wet a pot through.
+const WX_RAIN_MM = 6;
 const WX_RAIN_AHEAD_MM = 8;  // rain over next 2 days worth mentioning
 
 function wxEmoji(code) {
@@ -77,6 +79,10 @@ async function fetchWeather(now) {
     `?latitude=${w.lat}&longitude=${w.lon}` +
     "&current=temperature_2m,precipitation,weather_code" +
     "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,weather_code" +
+    // Hourly rain, three days back: what has actually FALLEN, hour by hour,
+    // is what can count as a watering — a daily total mixes in the forecast
+    // for the rest of today.
+    "&hourly=precipitation&past_days=3" +
     "&timezone=auto&forecast_days=7" +
     (weatherUnit() === "fahrenheit" ? "&temperature_unit=fahrenheit" : "");
   try {
@@ -105,9 +111,20 @@ async function geocodeCity(name) {
 // --------------------------------------------------------------------------
 // Deriving advice from the forecast
 // --------------------------------------------------------------------------
+/* Day i counted from today. The daily series now starts three days back
+   (past_days), so "today" is found by date rather than assumed at index 0. */
+function wxTodayIndex(wx) {
+  const d = wx && wx.daily;
+  if (!d || !d.time) return 0;
+  const today = localHourStr().slice(0, 10);
+  const at = d.time.indexOf(today);
+  return at === -1 ? 0 : at;
+}
 function wxDay(wx, i) {
   const d = wx && wx.daily;
-  if (!d || !d.time || d.time.length <= i) return null;
+  if (!d || !d.time) return null;
+  i += wxTodayIndex(wx);
+  if (d.time.length <= i) return null;
   return {
     date: d.time[i],
     tmax: d.temperature_2m_max[i],
@@ -148,7 +165,7 @@ function weatherAdvisories(wx) {
     out.push({ icon: "🔥", text: `Hot today (${Math.round(today.tmax)}${deg}) — porch pots dry out fast. Check soil even if not on the schedule, and water in the morning or evening.` });
   }
   if (flags.rainToday) {
-    out.push({ icon: "🌧️", text: `${today.rain.toFixed(1)} mm of rain today — uncovered porch plants may not need watering. Check the soil before you skip, covered pots still need you.` });
+    out.push({ icon: "🌧️", text: `${today.rain.toFixed(1)} mm of rain today — once it has fallen, uncovered porch plants get it logged as a watering. Covered pots still need you.` });
   } else if (flags.rainAhead) {
     out.push({ icon: "🌦️", text: "Decent rain expected in the next couple of days — thirsty-but-not-desperate porch plants can wait for it." });
   }
@@ -164,4 +181,31 @@ function weekWeatherLabel(wx, i) {
   if (!d) return "";
   const rain = d.rain >= 1 ? " 🌧️" : "";
   return `${Math.round(d.tmax)}°${rain || " " + wxEmoji(d.code)}`;
+}
+
+
+// --------------------------------------------------------------------------
+// Rain that has actually fallen, per local day, up to this hour
+// --------------------------------------------------------------------------
+/* Open-Meteo's hourly series is in the location's local time, as strings
+   like "2026-11-21T14:00". Summing only the hours already behind us means
+   today's figure is rain on the ground, not rain in the forecast. Days come
+   out oldest first. */
+function localHourStr(d = new Date()) {
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`;
+}
+function rainfallByDay(wx) {
+  const out = new Map();
+  const h = wx && wx.hourly;
+  if (!h || !Array.isArray(h.time) || !Array.isArray(h.precipitation)) return out;
+  const now = localHourStr();
+  for (let i = 0; i < h.time.length; i++) {
+    const t = h.time[i];
+    if (t > now) break;
+    const mm = Number(h.precipitation[i]) || 0;
+    const day = t.slice(0, 10);
+    out.set(day, (out.get(day) || 0) + mm);
+  }
+  return out;
 }
