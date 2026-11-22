@@ -898,10 +898,44 @@ async function openHealthSheet(plants, logs) {
   el.querySelector(".sheet-close").addEventListener("click", closeAnd);
 }
 
+/* Rain is a watering.
+
+   An outdoor plant that took a soaking doesn't need the can, and the owner
+   shouldn't have to tell the app so. Each local day with WX_RAIN_MM or more
+   on the ground (hours already past, so a forecast never counts) becomes a
+   "rain" entry in the plant's history and moves lastWatered forward, the
+   same as a logged watering. Covered plants — under a roof or an overhang —
+   are skipped; that's the plant's `covered` flag. Deterministic ids make it
+   idempotent on both phones. Returns what it applied. */
+async function applyRainfall(plants, wx) {
+  const applied = [];
+  if (!wx) return applied;
+  const byDay = rainfallByDay(wx);
+  if (!byDay.size) return applied;
+  for (const p of plants) {
+    if (p.archived || !isOutdoorPlant(p) || p.covered) continue;
+    for (const [date, mm] of byDay) {
+      if (mm < WX_RAIN_MM) continue;
+      if (p.lastWatered && p.lastWatered >= date) continue;
+      const id = `rain_${p.id}_${date}`;
+      if (await dbGet("logs", id)) continue;
+      const at = date === todayStr() || date === localHourStr().slice(0, 10)
+        ? new Date().toISOString() : new Date(date + "T18:00:00").toISOString();
+      await saveRecord("logs", { id, plantId: p.id, type: "rain", at, by: "Weather", note: `${mm.toFixed(1)} mm of rain`, mm });
+      const soak = q => { if (!q.lastWatered || q.lastWatered < date) q.lastWatered = date; delete q.waterSnooze; };
+      soak(p); // the caller's copy stays in step…
+      await updatePlant(p.id, soak); // …the record is written fresh
+      applied.push({ plant: p, date, mm });
+    }
+  }
+  return applied;
+}
+
 async function viewToday(seq = renderSeq) {
   const plants = await dbAll("plants");
   const hasOutdoor = plants.some(p => !p.archived && isOutdoorPlant(p));
   const wx = hasOutdoor ? await getWeather() : null;
+  if (wx) await applyRainfall(plants, wx);
   const wxFlags = wx ? todayWeatherFlags(wx) : {};
   const care = computeCareTasks(plants);
   const overdue = care.filter(t => t.delta < 0);
@@ -954,6 +988,20 @@ async function viewToday(seq = renderSeq) {
       // Only advisories earn space, and only when there is one — "nothing
       // dramatic in the forecast" was a card's worth of furniture saying nothing.
       const advisories = weatherAdvisories(wx);
+      // Rain that did the watering in the last three days, so the missing
+      // Water job on a porch plant reads as a fact rather than a mystery.
+      const since = addDays(todayStr(), -3);
+      const rained = allLogs.filter(l => l.type === "rain" && l.at.slice(0, 10) >= since);
+      if (rained.length) {
+        const byDate = new Map();
+        for (const l of rained) { const d = l.at.slice(0, 10); byDate.set(d, (byDate.get(d) || new Set()).add(l.plantId)); }
+        const lines = [...byDate.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([d, ids]) => {
+          const mm = rained.find(l => l.at.slice(0, 10) === d).mm;
+          const names = [...ids].map(id => (plants.find(p => p.id === id) || {}).name).filter(Boolean);
+          return `${typeof mm === "number" ? mm.toFixed(0) + " mm on " : "Rain on "}${d === todayStr() ? "today" : fmtDate(d)} watered ${names.length === 1 ? names[0] : names.length + " porch plants"}`;
+        });
+        advisories.push({ icon: "🌧️", text: `Rain did the watering — ${lines.join("; ")}.` });
+      }
       if (advisories.length) {
         wxBlock = `<div class="card flat wx-card">
           ${advisories.map(a => `<div class="wx-advice">${a.icon} ${esc(a.text)}</div>`).join("")}
@@ -2262,7 +2310,11 @@ async function viewAddEdit(editId = null) {
           <input type="checkbox" id="pOutdoor" ${editing ? (isOutdoorPlant(editing) ? "checked" : "") : (seed.outdoor ? "checked" : "")} style="width:18px;height:18px">
           Lives outdoors (porch, balcony, garden)
         </label>
-        <div class="hint">Outdoor plants get season- and weather-aware care: watering flexes with the season, and live weather flags rain, heat, and frost.</div>
+        <div class="hint">Outdoor plants get season- and weather-aware care: watering flexes with the season, live weather flags heat and frost, and a soaking rain (6 mm or more) is logged as a watering.</div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
+          <input type="checkbox" id="pCovered" ${editing && editing.covered ? "checked" : ""} style="width:18px;height:18px">
+          Covered from rain (under a roof or overhang)
+        </label>
       </div>
       <div class="field-row">
         <div class="field">
@@ -2501,6 +2553,7 @@ async function viewAddEdit(editId = null) {
       await saveSettings();
     }
     plant.outdoor = outdoorCb.checked;
+    plant.covered = !!document.getElementById("pCovered").checked;
     plant.waterEvery = parseInt(document.getElementById("pWater").value, 10) || 0;
     plant.fertEvery = parseInt(document.getElementById("pFert").value, 10) || 0;
     plant.lastWatered = document.getElementById("pLastWater").value || null;
@@ -3093,8 +3146,8 @@ async function viewPlant(id) {
     return `<span class="badge ${cls}">${label} ${fmtDate(due)}</span>`;
   };
 
-  const logIcons = { water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️", note: "📝", ai: "✨", check: "💦" };
-  const logVerbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned", check: "Checked" };
+  const logIcons = { water: "💧", fertilize: "🌾", repot: "🪴", prune: "✂️", note: "📝", ai: "✨", check: "💦", rain: "🌧️" };
+  const logVerbs = { water: "Watered", fertilize: "Fertilized", repot: "Repotted", prune: "Pruned", check: "Checked", rain: "Rain" };
   const logLine = (l) => {
     if (l.type === "ai") return `Health check${typeof l.score === "number" ? ` ${l.score}/10` : ""} — ${esc(l.note)}`;
     if (l.type === "note") return esc(l.note);
